@@ -306,7 +306,7 @@ func (ck *Check) cond(expr ast.Expr, init set) (initTrue set, initFalse set) {
 	if expr, ok := expr.(*ast.Nary); ok {
 		if expr.Tok == tok.And || expr.Tok == tok.Or {
 			first, _ := ck.expr(expr.Exprs[0], init) // first is always done
-			rest := first
+			rest := first.cow() // so appending to rest doesn't corrupt first
 			for _, e := range expr.Exprs[1:] {
 				rest, _ = ck.expr(e, rest) // rest are conditional
 			}
@@ -509,8 +509,13 @@ func (ck *Check) blockAsClosure(b *ast.Block, init set) set {
 	// pass full init so nested closures can see all outer vars
 	after := ck.check(&b.Function, init, true)
 	// only merge shared vars back; non-shared block-locals stay invisible
-	init = before
+	// skip params - they may have shared slots (captured by inner blocks)
+	// but they belong to this block, not the outer scope
+	init = before.cow()
 	for _, name := range shared {
+		if isParam(b.Params, name) {
+			continue
+		}
 		if after.has(name) && !init.has(name) {
 			init = init.with(name)
 		}
@@ -540,6 +545,15 @@ func (ck *Check) blockAsClosure(b *ast.Block, init set) set {
 	}
 
 	return init
+}
+
+func isParam(params []ast.Param, name string) bool {
+	for _, p := range params {
+		if p.Name.ParamName() == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (ck *Check) initVar(init set, id string, pos int) set {

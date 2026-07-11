@@ -6,7 +6,10 @@ package query
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apmckinlay/gsuneido/compile/ast"
@@ -182,7 +185,7 @@ func TestWhere_perIndex(t *testing.T) {
 	test("b in (2,3)",
 		"(a,b,c) = pre: 1 idx: .5")
 	test("b is 1 and c in (2,3)",
-		"(a,b,c) +b: <1..1,max> = pre: 1 skp: .71 idx: .71")
+		"(a,b,c) +b: <1..1,max> = pre: 1 skp: .5 idx: .71")
 	test("b is 2 and c is 3",
 		"(a,b,c) +b,c: <2,3..2,3,max> = pre: 1 skp: .5")
 	test("a is 1 and c is 3",
@@ -608,7 +611,7 @@ func TestWhere_keyfixed(t *testing.T) {
 	q := ParseQuery("table where a=4", tran, nil)
 	q = q.Transform()
 	index := []string{"b"}
-	req := OrderedReq(index, 1)
+	req := OrderReq(index, 1)
 	Optimize(q, ReadMode, req)
 	q = SetApproach(q, req, tran)
 	assert.That(q.fastSingle())
@@ -691,7 +694,7 @@ func TestWhere_SelOrgNotFull(t *testing.T) {
 	// but (a,c) doesn't support lookups on (a,b) even with fixed
 	q = q.Transform()
 	key := []string{"a", "b"}
-	req := OrderedReq(key, 1)
+	req := OrderReq(key, 1)
 	Optimize(q, ReadMode, req)
 	q = SetApproach(q, req, tran)
 	q.Lookup(nil, Sels{{"a", Pack(SuInt(4))}, {"b", Pack(SuInt(5))}})
@@ -755,37 +758,180 @@ func TestWhereCost(t *testing.T) {
 }
 
 func TestSplitFrac(t *testing.T) {
-	test := func(f float64, b1, b2, b3 bool) {
-		r1, r2, r3 := splitFrac(f, b1, b2, b3)
-		product := r1 * r2 * r3
-		assert.T(t).That(sameFrac(product, f))
-		bs := []bool{b1, b2, b3}
-		rs := []float64{r1, r2, r3}
-		n := countTrue(b1, b2, b3)
-		if n > 0 {
-			v := math.Pow(f, 1.0/float64(n))
-			for i, b := range bs {
-				if b {
-					assert.T(t).That(sameFrac(rs[i], v))
-				} else {
-					assert.T(t).That(sameFrac(rs[i], 1.0))
-				}
-			}
+	test := func(f float64, hasSkip, hasIdxFilter, hasDataFilter bool,
+		expSkip, expIdx, expDat string, expectProduct bool) {
+		r1, r2, r3 := splitFrac(f, hasSkip, hasIdxFilter, hasDataFilter)
+		assert.T(t).This(fracStr(r1)).Is(expSkip)
+		assert.T(t).This(fracStr(r2)).Is(expIdx)
+		assert.T(t).This(fracStr(r3)).Is(expDat)
+		if expectProduct {
+			product := r1 * r2 * r3
+			assert.T(t).That(sameFrac(product, f))
 		}
 	}
-	test(.49, true, false, true)
-	test(.25, true, true, true)
-	test(.8, true, false, false)
-	test(.5, false, true, false)
-	test(.36, true, true, false)
+	// skip + dataFilter: skip=0.5, dataFilter absorbs residual
+	test(.49, true, false, true, ".5", "1", ".98", true)
+	// skip + idxFilter + dataFilter: dataFilter absorbs residual
+	test(.25, true, true, true, ".5", ".71", ".71", true)
+	// skip only: fixed default
+	test(.8, true, false, false, ".5", "1", "1", false)
+	// idxFilter only: fixed default; product is a heuristic, NOT f
+	// (only coincidentally equals f here since idxFilterFrac == .5 == f)
+	test(.5, false, true, false, "1", ".5", "1", false)
+	// idxFilter only with f != .5 confirms product does NOT track f
+	test(.3, false, true, false, "1", ".5", "1", false)
+	// skip + idxFilter, no dataFilter: diminishing defaults
+	test(.36, true, true, false, ".5", ".71", "1", false)
+	// dataFilter only: absorbs all
+	test(.3, false, false, true, "1", "1", ".3", true)
+	// no filters
+	test(.5, false, false, false, "1", "1", "1", false)
+	// f=0 with skip+dataFilter: defaults, no adjustment
+	test(0, true, false, true, ".5", "1", ".71", false)
+	// f=0 with all filters: diminishing defaults, no adjustment
+	test(0, true, true, true, ".5", ".71", ".84", false)
+	// f=0 no filters
+	test(0, false, false, false, "1", "1", "1", false)
+	// clamping: f > activeProduct, dataFilter clamped to 1
+	test(.8, true, true, true, ".5", ".71", "1", false)
+	// skip + dataFilter, f > skipFrac: dataFilter clamped to 1
+	test(.8, true, false, true, ".5", "1", "1", false)
 }
 
-func countTrue(bs ...bool) int {
-	n := 0
-	for _, b := range bs {
-		if b {
-			n++
+func TestAllSingleValuePrefix(t *testing.T) {
+	assert := assert.T(t).This
+
+	// helper to create perCol map with single value spans
+	makePerCol := func(pairs ...string) map[string][]span {
+		m := make(map[string][]span)
+		for i := 0; i < len(pairs); i += 2 {
+			m[pairs[i]] = []span{valSpan(pairs[i+1])}
+		}
+		return m
+	}
+
+	// basic case: two columns with values
+	index := []string{"a", "b"}
+	perCol := makePerCol("a", "x", "b", "y")
+	prefixLen, org, ok := allSingleValuePrefix(index, true, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(2)
+	assert(org).Is("x\x00\x00y")
+
+	// trailing empty field: (a="x", b="") — org is trimmed to "x"
+	perCol = makePerCol("a", "x", "b", "")
+	prefixLen, org, ok = allSingleValuePrefix(index, true, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(2)
+	assert(org).Is("x") // trailing separator trimmed by Encoder.String()
+
+	// multiple trailing empty fields
+	index = []string{"a", "b", "c"}
+	perCol = makePerCol("a", "x", "b", "", "c", "")
+	prefixLen, org, ok = allSingleValuePrefix(index, true, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(3)
+	assert(org).Is("x") // both trailing separators trimmed
+
+	// middle empty field (not trailing)
+	index = []string{"a", "b", "c"}
+	perCol = makePerCol("a", "x", "b", "", "c", "z")
+	prefixLen, org, ok = allSingleValuePrefix(index, true, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(3)
+	assert(org).Is("x\x00\x00\x00\x00z")
+
+	// single column (no encoding)
+	index = []string{"a"}
+	perCol = makePerCol("a", "x")
+	prefixLen, org, ok = allSingleValuePrefix(index, false, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(1)
+	assert(org).Is("x")
+
+	// partial prefix (b has no span)
+	index = []string{"a", "b"}
+	perCol = makePerCol("a", "x")
+	prefixLen, org, ok = allSingleValuePrefix(index, true, perCol)
+	assert(ok).Is(true)
+	assert(prefixLen).Is(1)
+	assert(org).Is("x")
+}
+
+func TestBuildIdxSelTrailingEmpty(t *testing.T) {
+	assert := assert.T(t).This
+
+	// Verify the range end construction matches Table's selEnd approach.
+	// For prefix values with trailing empty fields, the end must include
+	// the empty field separator so that keys with non-empty values are excluded.
+
+	// Case 1: trailing empty field (a="x", b="")
+	// Expected end: "x\x00\x00\x00\x00Max" (same as selEnd)
+	var enc ixkey.Encoder
+	enc.Add("x")
+	enc.Add("")
+	enc.Add(ixkey.Max)
+	end := enc.String()
+	assert(end).Is("x\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff")
+
+	// Case 2: no trailing empty (a="x", b="y")
+	enc.Add("x")
+	enc.Add("y")
+	enc.Add(ixkey.Max)
+	end = enc.String()
+	assert(end).Is("x\x00\x00y\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff")
+
+	// Case 3: multiple trailing empty (a="x", b="", c="")
+	enc.Add("x")
+	enc.Add("")
+	enc.Add("")
+	enc.Add(ixkey.Max)
+	end = enc.String()
+	assert(end).Is("x\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff")
+
+	// Verify that a key with non-empty b is excluded from the trailing-empty range
+	// Key for (a="x", b="y"): "x\x00\x00y"
+	keyWithNonEmptyB := "x\x00\x00y"
+	endTrailingEmpty := "x\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff"
+	assert(keyWithNonEmptyB > endTrailingEmpty).Is(true)
+
+	// Key for (a="x", b=""): "x" (trimmed)
+	keyWithEmptyB := "x"
+	assert(keyWithEmptyB >= "x").Is(true)
+	assert(keyWithEmptyB < endTrailingEmpty).Is(true)
+}
+
+func TestWhere_nonexistent(t *testing.T) {
+	db := heapDb()
+	defer db.Close()
+	db.adm(`create table (num, name, parent, group) 
+		key(num) key(name,group) index(parent,name)`)
+	for i := range 100 {
+		s := strconv.Itoa(i)
+		if i%10 == 0 {
+			db.act("insert { num: " + s + ", name: 'a" + s + "', " +
+				"parent: " + s + ", group: " + s + " } into table")
+		} else {
+			p := strconv.Itoa(rand.IntN(10) * 10)
+			db.act("insert { num: " + s +
+				", name: 'a" + s + "', parent: " + p + ", group: -1 } into table")
 		}
 	}
-	return n
+
+	test := func(parent string) {
+		t.Helper()
+		tran := db.NewReadTran()
+		q := ParseQuery("table where group >= -1 and parent = "+parent, tran, nil)
+		// Regression: a nonexistent prefix point must not collapse wfrac
+		// to zero and cause the optimizer to pick a worse index.
+		// Both existing and nonexistent parent values should select the
+		// (parent,name,num) index since parent is the leading prefix column.
+		q = q.Transform()
+		req := NoneReq(1)
+		Optimize(q, ReadMode, req)
+		q = SetApproach(q, req, tran)
+		assert.T(t).That(strings.Contains(String(q), "table^(parent,name,num)"))
+	}
+	test("20")   // exists
+	test("9999") // nonexistent
 }
