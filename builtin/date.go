@@ -140,14 +140,12 @@ func dateStatic_End() Value {
 var _ = staticMethod(dateStatic_Members, "() :object")
 
 func dateStatic_Members() Value {
-	return date_members
+	return methodList(dateStaticMethods)
 }
-
-var date_members = methodList(dateStaticMethods)
 
 var _ = exportMethods(&DateMethods, "date")
 
-var _ = method(date_MinusDays, "(date) :number")
+var _ = method(date_MinusDays, "(date :date) :number")
 
 func date_MinusDays(this Value, val Value) Value {
 	t1 := toDate(this)
@@ -157,7 +155,7 @@ func date_MinusDays(this Value, val Value) Value {
 	panic("date.MinusDays requires date")
 }
 
-var _ = method(date_MinusSeconds, "(date) :number")
+var _ = method(date_MinusSeconds, "(date :date) :number")
 
 func date_MinusSeconds(this Value, val Value) Value {
 	t1 := toDate(this)
@@ -171,7 +169,7 @@ func date_MinusSeconds(this Value, val Value) Value {
 	panic("date.MinusSeconds requires date")
 }
 
-var _ = method(date_FormatEn, "(format) :string")
+var _ = method(date_FormatEn, "(format :string) :string")
 
 func date_FormatEn(this, arg Value) Value {
 	return SuStr(toDate(this).Format(ToStr(arg)))

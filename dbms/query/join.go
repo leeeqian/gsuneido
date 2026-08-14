@@ -12,6 +12,7 @@ import (
 	. "github.com/apmckinlay/gsuneido/core"
 	"github.com/apmckinlay/gsuneido/core/trace"
 	"github.com/apmckinlay/gsuneido/util/assert"
+	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/set"
 	"github.com/apmckinlay/gsuneido/util/slc"
 	"github.com/apmckinlay/gsuneido/util/str"
@@ -69,27 +70,27 @@ type joinApproach struct {
 type joinType int
 
 const (
-	one_one joinType = iota + 1 //lint:ignore ST1003 for clarity
-	one_n                       //lint:ignore ST1003 for clarity
-	n_one                       //lint:ignore ST1003 for clarity
-	n_n                         //lint:ignore ST1003 for clarity
+	one_to_one   joinType = iota + 1 //lint:ignore ST1003 for clarity
+	one_to_many                      //lint:ignore ST1003 for clarity
+	many_to_one                      //lint:ignore ST1003 for clarity
+	many_to_many                     //lint:ignore ST1003 for clarity
 )
 
 func (jt joinType) toOne() bool {
-	return jt == one_one || jt == n_one
+	return jt == one_to_one || jt == many_to_one
 }
 
 func (jt joinType) String() string {
 	switch jt {
 	case 0:
 		return ""
-	case one_one:
+	case one_to_one:
 		return "1:1"
-	case one_n:
+	case one_to_many:
 		return "1:n"
-	case n_one:
+	case many_to_one:
 		return "n:1"
-	case n_n:
+	case many_to_many:
 		return "n:n"
 	default:
 		panic("bad joinType")
@@ -160,18 +161,21 @@ func newJoinBase(src1, src2 Query, by []string, t QueryTran,
 	jb := joinBase{qt: t, st: MakeSuTran(t), joinLike: newJoinLike(src1, src2), prevFixed1: prevFixed1, prevFixed2: prevFixed2}
 	jb.lookupCache.SetCounters(&joinCacheProbes, &joinCacheMisses)
 	jb.by = by
+	jb.joinType = getJoinType(by, src1, src2)
+	return jb
+}
+
+func getJoinType(by []string, src1, src2 Query) joinType {
 	k1 := hasKey(by, src1.Keys(), src1.Fixed())
 	k2 := hasKey(by, src2.Keys(), src2.Fixed())
 	if k1 && k2 {
-		jb.joinType = one_one
+		return one_to_one
 	} else if k1 {
-		jb.joinType = one_n
+		return one_to_many
 	} else if k2 {
-		jb.joinType = n_one
-	} else {
-		jb.joinType = n_n
+		return many_to_one
 	}
-	return jb
+	return many_to_many
 }
 
 func fixedToExpr(col string, values []string) ast.Expr {
@@ -188,7 +192,6 @@ func newJoinLike(src1, src2 Query) joinLike {
 	jl.source1, jl.source2 = src1, src2
 	jl.header = jl.getHeader()
 	jl.rowSiz.Set(jl.source1.rowSize() + jl.source2.rowSize())
-	jl.lookCost.Set(src1.lookupCost() * 2) // ???
 	return jl
 }
 
@@ -199,7 +202,7 @@ func (jn *Join) String() string {
 func (jb *joinBase) String(op string) string {
 	if jb.optimized {
 		op += " " + jb.joinType.String()
-	} else if jb.joinType == n_n {
+	} else if jb.joinType == many_to_many {
 		op += " /*MANY TO MANY*/"
 	}
 	return op + " by" + str.Join("(,)", jb.by)
@@ -234,13 +237,13 @@ func (jn *Join) getIndexes() [][]string {
 
 func (jn *Join) getKeys() [][]string {
 	switch jn.joinType {
-	case one_one:
+	case one_to_one:
 		return set.UnionFn(jn.source1.Keys(), jn.source2.Keys(), set.Equal[string])
-	case one_n:
+	case one_to_many:
 		return jn.source2.Keys()
-	case n_one:
+	case many_to_one:
 		return jn.source1.Keys()
-	case n_n:
+	case many_to_many:
 		return jn.keypairs()
 	default:
 		panic("unknown join type")
@@ -294,23 +297,23 @@ var joinRev = 0 // tests can set to impossible to prevent reverse
 
 func (jt joinType) reverse() joinType {
 	switch jt {
-	case one_n:
-		return n_one
-	case n_one:
-		return one_n
+	case one_to_many:
+		return many_to_one
+	case many_to_one:
+		return one_to_many
 	}
 	return jt
 }
 
-type joinCost2 struct {
+type joinCost struct {
 	req1, req2       Require
 	fixcost, varcost Cost
 }
 
 func (jn *Join) optimize(mode Mode, req Require) (Cost, Cost, any) {
-	fwd := joinopt2(jn.source1, jn.source2, jn.Nrows, jn.joinType,
+	fwd := jn.optDir(jn.source1, jn.source2, jn.Nrows, jn.joinType,
 		mode, req, jn.by)
-	rev := joinopt2(jn.source2, jn.source1, jn.Nrows, jn.joinType.reverse(),
+	rev := jn.optDir(jn.source2, jn.source1, jn.Nrows, jn.joinType.reverse(),
 		mode, req, jn.by)
 	rev.fixcost += outOfOrder + joinRev
 	if trace.JoinOpt.On() {
@@ -334,11 +337,13 @@ func (jn *Join) optimize(mode Mode, req Require) (Cost, Cost, any) {
 	return fwd.fixcost, fwd.varcost, approach
 }
 
-func joinopt2(src1, src2 Query, nrows func() (int, int), jt joinType,
-	mode Mode, req Require, by []string) joinCost2 {
+// optDir returns the cost of one direction (forward or reverse).
+// It deliberately does not take the receiver to avoid getting direction wrong.
+func (*joinBase) optDir(src1, src2 Query, nrows func() (int, int), jt joinType,
+	mode Mode, req Require, by []string) joinCost {
 	fixcost1, varcost1 := Optimize(src1, mode, req)
 	if fixcost1+varcost1 >= impossible {
-		return joinCost2{fixcost: impossible}
+		return joinCost{fixcost: impossible}
 	}
 	nrows1, _ := src1.Nrows()
 	nrows2, _ := src2.Nrows()
@@ -355,9 +360,9 @@ func joinopt2(src1, src2 Query, nrows func() (int, int), jt joinType,
 	}
 	fixcost2, varcost2 := Optimize(src2, mode, req2)
 	if fixcost2+varcost2 >= impossible {
-		return joinCost2{fixcost: impossible}
+		return joinCost{fixcost: impossible}
 	}
-	return joinCost2{req1: req, req2: req2,
+	return joinCost{req1: req, req2: req2,
 		fixcost: fixcost1 + fixcost2,
 		varcost: varcost1 + varcost2,
 	}
@@ -370,13 +375,13 @@ func (jn *Join) setApproach(req Require, approach any, tran QueryTran) {
 		jn.joinType = jn.joinType.reverse()
 	}
 	switch jn.joinType {
-	case one_one:
+	case one_to_one:
 		join11Count.Add(1)
-	case one_n:
+	case one_to_many:
 		join1nCount.Add(1)
-	case n_one:
+	case many_to_one:
 		joinn1Count.Add(1)
-	case n_n:
+	case many_to_many:
 		joinnnCount.Add(1)
 	}
 	jn.source1 = SetApproach(jn.source1, ap.req1, tran)
@@ -392,19 +397,19 @@ func (jn *Join) getNrows() (int, int) {
 
 func (jn *Join) nrows(n1, p1, n2, p2 int) int {
 	switch jn.joinType {
-	case one_one:
+	case one_to_one:
 		return min(n1, n2)
-	case n_one:
+	case many_to_one:
 		n1, p1, n2, p2 = n2, p2, n1, p1
 		fallthrough
-	case one_n:
+	case one_to_many:
 		p1 = max(1, p1) // avoid divide by zero
 		p2 = max(1, p2)
 		if n1 <= p1*n2/p2 { // rearranged n1/p1 <= n2/p2 (for integer math)
 			return n1 * p2 / p1
 		}
 		return n2
-	case n_n:
+	case many_to_many:
 		return (n1 * n2) / 2 // estimate half
 	default:
 		panic(assert.ShouldNotReachHere())
@@ -413,13 +418,13 @@ func (jn *Join) nrows(n1, p1, n2, p2 int) int {
 
 func (jn *Join) pop(p1, p2 int) int {
 	switch jn.joinType {
-	case one_one:
+	case one_to_one:
 		return min(p1, p2)
-	case n_one:
+	case many_to_one:
 		return p1
-	case one_n:
+	case one_to_many:
 		return p2
-	case n_n:
+	case many_to_many:
 		return (p1 * p2) / 2 // estimate half
 	default:
 		panic(assert.ShouldNotReachHere())
@@ -452,7 +457,7 @@ func (jn *Join) Get(th *Thread, dir Dir) Row {
 			jn.row2 = jn.source2.Get(th, dir)
 		}
 		if jn.row2 != nil {
-			// assert.That(jn.equalBy(th, jn.st, jn.row1, jn.row2))
+			dbg.Assert(func() bool { return jn.equalBy(th, jn.st, jn.row1, jn.row2) })
 			jn.ngets++
 			return JoinRows(jn.row1, jn.row2)
 		}
@@ -465,10 +470,11 @@ func (jn *Join) nextRow1(th *Thread, dir Dir) bool {
 		return false
 	}
 	// fmt.Println("Join row1", jn.row1)
-	// assert.That(set.Disjoint(jn.by, jn.sel2))
 	sel2 := slc.With(jn.sel2, jn.projectRow1(th, jn.row1)...)
-	if jn.joinType.toOne() {
+	if jn.joinType == many_to_one {
 		jn.lookupRow = jn.cachedLookup(th, sel2)
+	} else if jn.joinType == one_to_one {
+		jn.lookupRow = lookup(jn.source2, sel2, th, jn.st)
 	} else {
 		jn.source2.Select(sel2)
 	}
@@ -476,15 +482,11 @@ func (jn *Join) nextRow1(th *Thread, dir Dir) bool {
 }
 
 func (jb *joinBase) cachedLookup(th *Thread, sels Sels) Row {
-	return jb.lookupCache.Lookup(th, jb.source2, sels, jb.st)
+	return jb.lookupCache.Lookup(jb.source2, sels, th, jb.st)
 }
 
 func (jb *joinBase) projectRow1(th *Thread, row Row) Sels {
-	sels := make(Sels, len(jb.by))
-	for i, col := range jb.by {
-		sels[i] = Sel{col, row.GetRawVal(jb.source1.Header(), col, th, jb.st)}
-	}
-	return sels
+	return makeSels(jb.source1.Header(), row, jb.by, th, jb.st)
 }
 
 func (jn *Join) Select(sels Sels) {
@@ -523,12 +525,11 @@ func (jn *Join) Lookup(th *Thread, sels Sels) Row {
 	jn.nlooks++
 	sel1, sel2 := jn.splitSelect(sels)
 	if jn.lookupFallback(sel1) {
-		// log.Println("INFO Join Lookup fallback to Select & Get")
 		jn.rewind()
 		jn.source1.Select(sel1)
 		defer jn.Select(nil)
 		jn.sel2 = sel2
-		return GetNext1(jn, th, slc.With(sel1, sel2...))
+		return getNext1(jn, th)
 	}
 	row1 := jn.source1.Lookup(th, sel1)
 	if row1 == nil {
@@ -536,17 +537,19 @@ func (jn *Join) Lookup(th *Thread, sels Sels) Row {
 	}
 	var row2 Row
 	sel2 = append(sel2, jn.projectRow1(th, row1)...)
-	if jn.joinType.toOne() {
+	if jn.joinType == many_to_one {
 		row2 = jn.cachedLookup(th, sel2)
+	} else if jn.joinType == one_to_one {
+		row2 = lookup(jn.source2, sel2, th, jn.st)
 	} else {
 		jn.source2.Select(sel2)
 		defer jn.Select(nil)
-		row2 = GetNext1(jn.source2, th, sel2)
+		row2 = getNext1(jn.source2, th)
 	}
 	if row2 == nil {
 		return nil
 	}
-	// assert.That(jn.equalBy(th, jn.st, row1, row2))
+	dbg.Assert(func() bool { return jn.equalBy(th, jn.st, row1, row2) })
 	return JoinRows(row1, row2)
 }
 
@@ -645,9 +648,9 @@ func (lj *LeftJoin) getKeys() [][]string {
 	// can't use source2.Keys() like Join.Keys()
 	// because multiple right sides can be missing/blank
 	switch lj.joinType {
-	case one_one, n_one:
+	case one_to_one, many_to_one:
 		return lj.source1.Keys()
-	case one_n, n_n:
+	case one_to_many, many_to_many:
 		return lj.keypairs()
 	default:
 		panic("unknown join type")
@@ -711,7 +714,7 @@ func fixedConflict(fixed1, fixed2 Fixed) bool {
 }
 
 func (lj *LeftJoin) optimize(mode Mode, req Require) (Cost, Cost, any) {
-	jc := joinopt2(lj.source1, lj.source2, lj.Nrows, lj.joinType,
+	jc := lj.optDir(lj.source1, lj.source2, lj.Nrows, lj.joinType,
 		mode, req, lj.by)
 	if jc.fixcost == impossible {
 		return impossible, impossible, nil
@@ -723,13 +726,13 @@ func (lj *LeftJoin) optimize(mode Mode, req Require) (Cost, Cost, any) {
 func (lj *LeftJoin) setApproach(req Require, approach any, tran QueryTran) {
 	ap := approach.(*joinApproach)
 	switch lj.joinType {
-	case one_one:
+	case one_to_one:
 		leftJoin11Count.Add(1)
-	case one_n:
+	case one_to_many:
 		leftJoin1nCount.Add(1)
-	case n_one:
+	case many_to_one:
 		leftJoinn1Count.Add(1)
-	case n_n:
+	case many_to_many:
 		leftJoinnnCount.Add(1)
 	}
 	lj.source1 = SetApproach(lj.source1, ap.req1, tran)
@@ -746,16 +749,16 @@ func (lj *LeftJoin) getNrows() (int, int) {
 
 func (lj *LeftJoin) nrows(n1, p1, n2, p2 int) int {
 	switch lj.joinType {
-	case one_one, n_one:
+	case one_to_one, many_to_one:
 		return n1
-	case one_n:
+	case one_to_many:
 		p1 = max(1, p1) // avoid divide by zero
 		p2 = max(1, p2)
 		if n1 <= p1*n2/p2 { // rearranged n1/p1 <= n2/p2 (for integer math)
 			return n1 * p2 / p1
 		}
 		return n2
-	case n_n:
+	case many_to_many:
 		return max(n1, (n1*n2)/2) // estimate half
 	default:
 		panic(assert.ShouldNotReachHere())
@@ -764,11 +767,11 @@ func (lj *LeftJoin) nrows(n1, p1, n2, p2 int) int {
 
 func (lj *LeftJoin) pop(n1, n2 int) int {
 	switch lj.joinType {
-	case one_one, n_one:
+	case one_to_one, many_to_one:
 		return n1
-	case one_n:
+	case one_to_many:
 		return n2
-	case n_n:
+	case many_to_many:
 		return max(n1, (n1*n2)/2) // estimate half
 	default:
 		panic(assert.ShouldNotReachHere())
@@ -787,8 +790,10 @@ func (lj *LeftJoin) Get(th *Thread, dir Dir) (r Row) {
 				return nil
 			}
 			sels := lj.projectRow1(th, lj.row1)
-			if lj.joinType.toOne() {
+			if lj.joinType == many_to_one {
 				lj.lookupRow = lj.cachedLookup(th, sels)
+			} else if lj.joinType == one_to_one {
+				lj.lookupRow = lookup(lj.source2, sels, th, lj.st)
 			} else {
 				lj.source2.Select(sels)
 			}
@@ -806,8 +811,8 @@ func (lj *LeftJoin) Get(th *Thread, dir Dir) (r Row) {
 			row2 := lj.row2
 			if row2 == nil {
 				row2 = lj.empty2
-				// } else {
-				// assert.That(lj.equalBy(th, lj.st, lj.row1, row2))
+			} else {
+				dbg.Assert(func() bool { return lj.equalBy(th, lj.st, lj.row1, row2) })
 			}
 			if lj.filter2(row2) {
 				lj.ngets++
@@ -845,7 +850,7 @@ func (lj *LeftJoin) Lookup(th *Thread, sels Sels) Row {
 		// log.Println("INFO LeftJoin Lookup fallback to Select & Get")
 		lj.rewind()
 		lj.source1.Select(sel1)
-		return GetNext1(lj, th, sel1)
+		return getNext1(lj, th)
 	}
 	row1 := lj.source1.Lookup(th, sel1)
 	if row1 == nil {
@@ -853,16 +858,18 @@ func (lj *LeftJoin) Lookup(th *Thread, sels Sels) Row {
 	}
 	var row2 Row
 	sel := lj.projectRow1(th, row1)
-	if lj.joinType.toOne() {
+	if lj.joinType == many_to_one {
 		row2 = lj.cachedLookup(th, sel)
+	} else if lj.joinType == one_to_one {
+		row2 = lookup(lj.source2, sel, th, lj.st)
 	} else {
 		lj.source2.Select(sel)
 		row2 = lj.source2.Get(th, Next)
 	}
 	if row2 == nil {
 		row2 = lj.empty2
-		// } else {
-		// assert.That(lj.equalBy(th, lj.st, row1, row2))
+	} else {
+		dbg.Assert(func() bool { return lj.equalBy(th, lj.st, row1, row2) })
 	}
 	if !lj.filter2(row2) {
 		return nil

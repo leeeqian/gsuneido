@@ -24,9 +24,6 @@ import (
 	"github.com/apmckinlay/gsuneido/util/tsc"
 )
 
-var whereSingletonCount atomic.Int64
-var _ = AddInfo("query.where.singleton", &whereSingletonCount)
-
 // NOTE: Where source and expr should NOT be modified,
 // instead, construct a new one with NewWhere
 
@@ -93,10 +90,14 @@ type whereApproach struct {
 	index []string
 	*idxSel
 	cost Cost
+	mode Mode
 }
 
+var whereSingletonCount atomic.Int64
+var _ = AddInfo("query.where.singleton", &whereSingletonCount)
+
 func NewWhere(src Query, expr ast.Expr, t QueryTran) *Where {
-	if !set.Subset(src.Columns(), expr.Columns()) {
+	if !set.HasSubset(src.Columns(), expr.Columns()) {
 		panic("where: nonexistent columns: " + str.Join(", ",
 			set.Difference(expr.Columns(), src.Columns())))
 	}
@@ -107,7 +108,6 @@ func NewWhere(src Query, expr ast.Expr, t QueryTran) *Where {
 	w.header = src.Header()
 	w.rowSiz.Set(src.rowSize())
 	w.singleTbl.Set(src.SingleTable())
-	w.lookCost.Set(src.lookupCost())
 	w.calcFixed()
 	if !w.conflict {
 		w.conflict = w.exprFalse()
@@ -345,7 +345,7 @@ func (w *Where) Transform() Query {
 		cols1 := q.source.Columns()
 		var before, after []ast.Expr
 		for _, e := range w.expr.Exprs {
-			if set.Subset(cols1, e.Columns()) {
+			if set.HasSubset(cols1, e.Columns()) {
 				before = append(before, e)
 			} else {
 				after = append(after, e)
@@ -404,7 +404,7 @@ func (w *Where) Transform() Query {
 		cols1 := q.source1.Columns()
 		var common, exprs1 []ast.Expr
 		for _, e := range w.expr.Exprs {
-			if set.Subset(cols1, e.Columns()) {
+			if set.HasSubset(cols1, e.Columns()) {
 				exprs1 = append(exprs1, e)
 			} else {
 				common = append(common, e)
@@ -462,10 +462,10 @@ func (w *Where) lookup1() (string, Value) {
 }
 
 func (w *Where) leftJoinToJoin(lj *LeftJoin) bool {
-	flds := lj.source2.Header().GetFields()
+	flds := lj.source2.Header().Physical()
 	flds = set.Difference(flds, lj.by)
 	for _, e := range w.expr.Exprs {
-		if set.Subset(flds, e.Columns()) && !ast.CanBeEmpty(e) {
+		if set.HasSubset(flds, e.Columns()) && !ast.CanBeEmpty(e) {
 			return true
 		}
 	}
@@ -501,11 +501,11 @@ func (w *Where) split(q2 Query, newQ2 func(Query, Query) Query) Query {
 	var common, exprs1, exprs2 []ast.Expr
 	for _, e := range w.expr.Exprs {
 		used := false
-		if set.Subset(cols1, e.Columns()) {
+		if set.HasSubset(cols1, e.Columns()) {
 			exprs1 = append(exprs1, e)
 			used = true
 		}
-		if set.Subset(cols2, (e.Columns())) {
+		if set.HasSubset(cols2, (e.Columns())) {
 			if used {
 				e = replaceExpr(e, nil, nil, true) // clone
 			}
@@ -547,18 +547,18 @@ func (w *Where) optimize(mode Mode, req Require) (Cost, Cost, any) {
 		return fixcost, varcost, nil
 	}
 	if req.use == ReqUnique {
-		return w.optWhereLookup(req)
+		return w.optWhereLookup(mode, req)
 	}
-	return w.optWhereIdx(req)
+	return w.optWhereIdx(mode, req)
 }
 
-func (w *Where) optWhereIdx(req Require) (Cost, Cost, any) {
+func (w *Where) optWhereIdx(mode Mode, req Require) (Cost, Cost, any) {
 	if w.singleton {
 		// here singleton == fastSingle
 		// because source is a Table and Table keys are a subset of indexes
-		cost := w.source.lookupCost()
 		isel := w.idxSels[0]
-		return 0, cost, &whereApproach{index: isel.index, cost: cost, idxSel: isel}
+		cost := w.tbl.lookupCost(isel.index)
+		return 0, cost, &whereApproach{index: isel.index, cost: cost, idxSel: isel, mode: mode}
 	}
 	type bestIdx struct {
 		index  []string
@@ -569,7 +569,7 @@ func (w *Where) optWhereIdx(req Require) (Cost, Cost, any) {
 		if !req.SatisfiedByWithFixed(idx, w.fixed) {
 			continue
 		}
-		_, varCost, _ := w.tbl.optimize(0, OrderReq(idx, 1.0))
+		_, varCost, _ := w.tbl.optimize(mode, OrderReq(idx, 1.0))
 		irFrac := 1.0
 		ifFrac := 1.0
 		dfFrac := w.wfrac
@@ -580,33 +580,33 @@ func (w *Where) optWhereIdx(req Require) (Cost, Cost, any) {
 			dfFrac = isel.dataFilterFrac
 		}
 		cost := WhereCost(float64(varCost), float64(req.frac), irFrac, ifFrac, dfFrac)
-		cost += Cost(req.nseeks) * w.source.lookupCost()
+		cost += Cost(req.nseeks) * w.tbl.lookupCost(idx)
 		best.update(0, cost, bestIdx{index: idx, idxSel: isel})
 	}
 	if best.none() {
 		return impossible, impossible, nil
 	}
 	return 0, best.varcost, &whereApproach{index: best.data.index,
-		cost: best.varcost, idxSel: best.data.idxSel}
+		cost: best.varcost, idxSel: best.data.idxSel, mode: mode}
 }
 
-func (w *Where) optWhereLookup(req Require) (Cost, Cost, any) {
+func (w *Where) optWhereLookup(mode Mode, req Require) (Cost, Cost, any) {
 	if w.singleton {
 		isel := w.idxSels[0]
-		cost := w.tbl.lookupCostFor(w.tbl.indexi(isel.index))
-		return 0, cost, &whereApproach{index: isel.index, cost: cost, idxSel: isel}
+		cost := w.tbl.lookupCost(isel.index)
+		return 0, cost, &whereApproach{index: isel.index, cost: cost, idxSel: isel, mode: mode}
 	}
 	best := newBest[[]string]()
 	for idxi, idx := range w.tbl.indexes {
-		if indexCovered(idx, req.cols, w.fixed) {
-			varcost := Cost(req.nseeks) * w.tbl.lookupCostFor(idxi)
+		if w.tbl.uniqueForLookup(idxi) && indexCovered(idx, req.cols, w.fixed) {
+			varcost := Cost(req.nseeks) * w.tbl.lookupCostI(idxi)
 			best.update(0, varcost, idx)
 		}
 	}
 	if best.none() {
 		return impossible, impossible, nil
 	}
-	return 0, best.varcost, &whereApproach{index: best.data, cost: best.varcost}
+	return 0, best.varcost, &whereApproach{index: best.data, cost: best.varcost, mode: mode}
 }
 
 // exprFalse checks if any expressions folded to false
@@ -632,9 +632,8 @@ func (w *Where) optInit() {
 		// fmt.Println("idxSels", w.idxSels)
 	}
 	// detect singleton when fixed covers a key (for non-Table sources).
-	// Required so bestLookupIndex doesn't pick an index with extra columns
+	// Required so we don't pick an index with extra columns
 	// that sels can't cover at Lookup time
-	// (lookupIndexEligible allows any index when nColsUnfixed == 0).
 	if !w.singleton && !w.conflict && w.tbl == nil {
 		if slices.ContainsFunc(w.source.Keys(), w.fixed.All) {
 			w.singleton = true
@@ -703,20 +702,20 @@ func (w *Where) setApproach(req Require, approach any, tran QueryTran) {
 		w.srcIndex = req.cols
 		w.tbl = nil
 	} else {
-		app := approach.(*whereApproach)
-		w.tbl.SetIndex(app.index)
-		w.srcIndex = app.index
-		if app.idxSel != nil {
-			w.ixCtx.cols = app.index
-			w.ixCtx.encodes = w.tbl.IndexEncodes(app.index)
+		ap := approach.(*whereApproach)
+		w.tbl.SetIndex(ap.index, ap.mode)
+		w.srcIndex = ap.index
+		if ap.idxSel != nil {
+			w.ixCtx.cols = ap.index
+			w.ixCtx.encodes = w.tbl.IndexEncodes(ap.index)
 			w.ixExpr = w.exprsFor(w.ixCtx.cols)
-			w.idxSelBase = app.idxSel
+			w.idxSelBase = ap.idxSel
 			w.idxSelActive = w.idxSelBase
-			w.tbl.setCost(float64(req.frac)*app.idxSel.prefixFrac*app.idxSel.skipFrac,
-				0, app.cost)
+			w.tbl.setCost(float64(req.frac)*ap.idxSel.prefixFrac*ap.idxSel.skipFrac,
+				0, ap.cost)
 			w.idxSelPos = -1
 		} else {
-			w.tbl.setCost(float64(req.frac), 0, app.cost)
+			w.tbl.setCost(float64(req.frac), 0, ap.cost)
 		}
 	}
 	w.header = w.source.Header()
@@ -726,7 +725,7 @@ func (w *Where) setApproach(req Require, approach any, tran QueryTran) {
 func (w *Where) exprsFor(cols []string) ast.Expr {
 	var exprs []ast.Expr
 	for _, e := range w.expr.Exprs {
-		if set.Subset(cols, e.Columns()) {
+		if set.HasSubset(cols, e.Columns()) {
 			exprs = append(exprs, e)
 		}
 	}
@@ -813,8 +812,7 @@ func (w *Where) getFilter(th *Thread, dir Dir) Row {
 	return w.tbl.GetFilter(dir, filterFunc)
 }
 
-// filter applies the entire where expression
-// and also selectSelCols/Vals singletonFilter
+// filter applies singleSels and the entire where expression
 func (w *Where) filter(th *Thread, row Row) bool {
 	if row == nil {
 		return true
@@ -921,7 +919,8 @@ func (w *Where) Lookup(th *Thread, sels Sels) Row {
 		// srcIndex == nil: fixed covers a key (singleton detected in optInit),
 		// so Optimize passed index=nil and setApproach left srcIndex nil.
 		w.Rewind()
-		return GetNext1(w, th, sels)
+		row := getNext1(w, th)
+		return lookupFilter(w.Header(), row, sels, th, w.rowCtx.Tran)
 	}
 	cloned := false
 	sels = slices.Clip(sels)
@@ -932,26 +931,19 @@ func (w *Where) Lookup(th *Thread, sels Sels) Row {
 			cloned = true // because they're clipped, append will realloc
 		}
 	}
-	isels, osels := Split(cloned, sels, w.srcIndex)
-	var residual Sels
-	for _, sel := range osels {
-		if !w.fixed.Has(sel.col) {
-			residual = append(residual, sel)
-		}
-	}
-
-	row := w.source.Lookup(th, slc.With(isels, residual...))
+	isels, _ := Split(cloned, sels, w.srcIndex)
+	row := lookup(w.source, isels, th, w.rowCtx.Tran)
 	if !w.filter(th, row) {
 		row = nil
 	}
 	return row
 }
 
-// Split partitions flds and vals, returning sub-slices.
-// It clones the slices only if modifications are needed.
-func Split(cloned bool, sels Sels, index []string) (isels, osels Sels) {
+// Split partitions sels relative to cols, returning sub-slices.
+// It clones sels only if modifications are needed.
+func Split(cloned bool, sels Sels, cols []string) (isels, osels Sels) {
 	pivot := func(i int) bool {
-		return slices.Contains(index, sels[i].col)
+		return slices.Contains(cols, sels[i].col)
 	}
 	swap := func(i, j int) {
 		if !cloned {
@@ -1000,6 +992,7 @@ func (w *Where) InCount() int {
 }
 
 func (w *Where) Simple(th *Thread) []Row {
+	w.singleSels = nil
 	ast.Unraw(w.expr)
 	w.rowCtx.Hdr = w.header
 	rows := w.source.Simple(th)

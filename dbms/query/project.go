@@ -12,6 +12,7 @@ import (
 	"github.com/apmckinlay/gsuneido/compile/ast"
 	. "github.com/apmckinlay/gsuneido/core"
 	"github.com/apmckinlay/gsuneido/util/assert"
+	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/hash"
 	"github.com/apmckinlay/gsuneido/util/set"
 	"github.com/apmckinlay/gsuneido/util/shmap"
@@ -20,19 +21,9 @@ import (
 	"github.com/apmckinlay/gsuneido/util/tsc"
 )
 
-var (
-	projCopyCount atomic.Int64
-	projSeqCount  atomic.Int64
-	projMapCount  atomic.Int64
-)
-
-var _ = AddInfo("query.project.copy", &projCopyCount)
-var _ = AddInfo("query.project.seq", &projSeqCount)
-var _ = AddInfo("query.project.map", &projMapCount)
-
 type Project struct {
 	Query1
-	results *mapType
+	dedup   *mapType // used by projMap to eliminate duplicates
 	st      *SuTran
 	columns []string
 	remove  []string
@@ -70,11 +61,21 @@ const (
 	projMap
 )
 
+var (
+	projCopyCount atomic.Int64
+	projSeqCount  atomic.Int64
+	projMapCount  atomic.Int64
+)
+
+var _ = AddInfo("query.project.copy", &projCopyCount)
+var _ = AddInfo("query.project.seq", &projSeqCount)
+var _ = AddInfo("query.project.map", &projMapCount)
+
 func NewProject(src Query, cols []string) *Project {
 	assert.That(len(cols) > 0)
 	cols = set.Unique(cols)
 	srcCols := src.Columns()
-	if !set.Subset(srcCols, cols) {
+	if !set.HasSubset(srcCols, cols) {
 		panic("project: nonexistent column(s): " +
 			str.Join(", ", set.Difference(cols, srcCols)))
 	}
@@ -126,12 +127,12 @@ func newProject2(src Query, cols []string, includeDeps bool) *Project {
 	p.rowSiz.Set(src.rowSize())
 	p.fast1.Set(src.fastSingle())
 	p.singleTbl.Set(src.SingleTable())
-	p.lookCost.Set(p.getLookupCost())
 	return p
 }
 
 // hasKey returns whether cols contains a key
-// taking fixed into consideration
+// taking fixed into consideration.
+// See also [indexContainsKey]
 func hasKey(cols []string, keys [][]string, fixed Fixed) bool {
 	for _, key := range keys {
 		if indexCovered(key, cols, fixed) {
@@ -153,24 +154,27 @@ func (*Project) includeDeps(cols, srcCols []string) []string {
 }
 
 func (p *Project) getHeader() *Header {
-	srcFlds := p.source.Header().Fields
-	newflds := make([][]string, len(srcFlds))
-	for i, fs := range srcFlds {
-		newflds[i] = projectFields(fs, p.columns)
-	}
-	return NewHeader(newflds, p.columns)
+	return projectHeader(p.source.Header(), p.columns)
 }
 
-func projectFields(fs []string, pcols []string) []string {
-	flds := make([]string, len(fs))
-	for i, f := range fs {
-		if slices.Contains(pcols, f) {
-			flds[i] = f
-		} else {
-			flds[i] = "-"
+// projectHeader builds a Header with the given columns.
+// Physical fields not in cols are replaced with "-" so Fields stays
+// parallel one-to-one with the underlying records.
+func projectHeader(src *Header, cols []string) *Header {
+	srcFlds := src.Fields
+	newflds := make([][]string, len(srcFlds))
+	for i, fs := range srcFlds {
+		flds := make([]string, len(fs))
+		for j, f := range fs {
+			if slices.Contains(cols, f) {
+				flds[j] = f
+			} else {
+				flds[j] = "-"
+			}
 		}
+		newflds[i] = flds
 	}
-	return flds
+	return NewHeader(newflds, cols)
 }
 
 func (p *Project) String() string {
@@ -200,6 +204,8 @@ func (p *Project) String() string {
 func (p *Project) SetTran(t QueryTran) {
 	p.st = MakeSuTran(t)
 	p.source.SetTran(t)
+	// don't need to clear dedup since projMap is only used in ReadMode
+	// which doesn't use SetTran
 }
 
 // projectKeys keeps keys that are subsets of cols.
@@ -207,7 +213,7 @@ func (p *Project) SetTran(t QueryTran) {
 func projectKeys(keys [][]string, cols []string) [][]string {
 	var keys2 [][]string
 	for _, k := range keys {
-		if set.Subset(cols, k) {
+		if set.HasSubset(cols, k) {
 			keys2 = append(keys2, k)
 		}
 	}
@@ -234,10 +240,12 @@ func projectIndexes(idxs [][]string, cols []string) [][]string {
 	return idxs2
 }
 
+const projGrpDiv = 4 // ???
+
 func (p *Project) getNrows() (int, int) {
 	nr, pop := p.source.Nrows()
 	if !p.unique {
-		nr /= 2 // ??? (matches lookupCost)
+		nr /= projGrpDiv
 	}
 	return nr, pop
 }
@@ -270,7 +278,7 @@ func (p *Project) Transform() Query {
 		if len(cols) == 0 { // no summaries left
 			return newProject(q.source, p.columns).Transform()
 		}
-		if set.Subset(p.columns, q.by) {
+		if set.HasSubset(p.columns, q.by) {
 			return NewSummarize(q.source, q.hint, q.by, cols, ops, ons).Transform()
 		}
 	case *Rename:
@@ -280,17 +288,17 @@ func (p *Project) Transform() Query {
 	case *Times:
 		return NewTimes(p.splitOver(&q.Query2)).Transform()
 	case *Join:
-		if set.Subset(p.columns, q.by) {
+		if set.HasSubset(p.columns, q.by) {
 			src1, src2 := p.splitOver(&q.Query2)
 			return q.With(src1, src2).Transform()
 		}
 	case *SemiJoin:
-		if set.Subset(p.columns, q.by) {
+		if set.HasSubset(p.columns, q.by) {
 			src1 := newProject(q.source1, p.columns)
 			return q.With(src1, q.source2).Transform()
 		}
 	case *LeftJoin:
-		if set.Subset(p.columns, q.by) {
+		if set.HasSubset(p.columns, q.by) {
 			src1, src2 := p.splitOver(&q.Query2)
 			return q.With(src1, src2).Transform()
 		}
@@ -452,15 +460,15 @@ func (p *Project) optimize(mode Mode, req Require) (Cost, Cost, any) {
 		return fixcost, varcost, &projectApproach{strat: projCopy, req: req}
 	}
 	// non-unique: merge incoming req with own ReqGroup(p.columns)
-	seqFix, seqVar, seqApp := p.seqCost(mode, req)
-	mapFix, mapVar, mapApp := p.mapCost(mode, req)
+	seqFix, seqVar, seqApp := p.optSeq(mode, req)
+	mapFix, mapVar, mapApp := p.optMap(mode, req)
 	if seqFix+seqVar <= mapFix+mapVar {
 		return seqFix, seqVar, seqApp
 	}
 	return mapFix, mapVar, mapApp
 }
 
-func (p *Project) seqCost(mode Mode, req Require) (Cost, Cost, any) {
+func (p *Project) optSeq(mode Mode, req Require) (Cost, Cost, any) {
 	fixed := p.source.Fixed()
 	nColsUnfixed := countUnfixed(p.columns, fixed)
 	nrows, _ := p.Nrows()
@@ -475,56 +483,28 @@ func (p *Project) seqCost(mode Mode, req Require) (Cost, Cost, any) {
 			return fixcost, varcost, &projectApproach{strat: projSeq, req: req}
 		}
 	case ReqUnique:
-		debug.assert(set.Equal(req.cols, p.columns)) // only key is all columns
+		// req.cols must cover the output key (all columns, since non-unique).
+		dbg.Assert(func() bool { return indexCovered(p.columns, req.cols, p.Fixed()) })
 		// we can use GroupReq because Lookup is implemented by Select + Get
-		srcReq := GroupReq(p.columns, req.SelectFrac(nrows), req.nseeks)
+		srcReq := GroupReq(req.cols, req.SelectFrac(nrows), req.nseeks)
 		fixcost, varcost := Optimize(p.source, mode, srcReq)
 		return fixcost, varcost, &projectApproach{strat: projSeq, req: srcReq}
 	case ReqGroup:
 		if len(req.cols) == len(p.columns) {
-			debug.assert(set.Equal(req.cols, p.columns)) // only key is all columns
+			dbg.Assert(func() bool { return set.Equal(req.cols, p.columns) }) // only key is all columns
 			fixcost, varcost := Optimize(p.source, mode, srcReq)
 			return fixcost, varcost, &projectApproach{strat: projSeq, req: srcReq}
-		}
-		if !eitherSubset(req.cols, p.columns) {
-			return impossible, impossible, nil
-		}
-		// requires are different ReqGroup
-		// this can't be handled with a single Require
-		// so we need to search here
-		nColsUnfixedReq := countUnfixed(req.cols, fixed)
-		best := newBest[Require]()
-		for _, idx := range p.source.Indexes() {
-			if grouped(idx, req.cols, nColsUnfixedReq, fixed) &&
-				grouped(idx, p.columns, nColsUnfixed, fixed) {
-				// source req must be ordered so it doesn't ignore column order
-				// which is necessary to satisfy both groupings
-				srcReq := OrderReq(idx, req.SelectFrac(nrows))
-				f, v := Optimize(p.source, mode, srcReq)
-				v += Cost(req.nseeks) * p.source.lookupCost()
-				best.update(f, v, srcReq)
-			}
-		}
-		if best.found() {
-			return best.fixcost, best.varcost,
-				&projectApproach{strat: projSeq, req: best.data}
 		}
 	}
 	return impossible, impossible, nil
 }
 
-// eitherSubset returns true if x is a subset of y or y is a subset of x
-func eitherSubset(x, y []string) bool {
-	if len(x) > len(y) {
-		x, y = y, x
-	}
-	return set.Subset(x, y)
-}
+const mapCost = 20 // ???
 
-// mapCost estimates the cost of projMap.
+// optMap estimates the cost of projMap.
 // The map is built incrementally during iteration (not up front),
 // so the map build cost is added to varcost, not fixcost.
-func (p *Project) mapCost(mode Mode, req Require) (Cost, Cost, any) {
+func (p *Project) optMap(mode Mode, req Require) (Cost, Cost, any) {
 	nrows, _ := p.Nrows()
 	if mode != ReadMode || nrows > mapThreshold {
 		return impossible, impossible, nil
@@ -533,7 +513,8 @@ func (p *Project) mapCost(mode Mode, req Require) (Cost, Cost, any) {
 		req = GroupReq(req.cols, req.SelectFrac(nrows), req.nseeks)
 	}
 	srcFixcost, srcVarcost := Optimize(p.source, mode, req)
-	mapBuild := Cost(float64(nrows) * float64(req.frac) * 20)
+	srcNrows, _ := p.source.Nrows()
+	mapBuild := Cost(float64(srcNrows) * float64(req.frac) * mapCost)
 	return srcFixcost, srcVarcost + mapBuild,
 		&projectApproach{strat: projMap, req: req}
 }
@@ -653,16 +634,16 @@ func (p *Project) getMap(th *Thread, dir Dir) Row {
 	p.th = th
 	defer func() { p.th = nil }()
 	if p.state == rewound {
-		if p.results == nil {
+		if p.dedup == nil {
 			hfn := func(k rowHash) uint64 { return k.hash }
 			eqfn := func(x, y rowHash) bool {
 				return x.hash == y.hash &&
-					equalCols(x.row, y.row, p.source.Header(), p.columns, p.th, p.st)
+					equalCols(x.row, y.row, p.Header(), p.columns, p.th, p.st)
 			}
-			p.results = shmap.NewMapFuncs[rowHash, struct{}](hfn, eqfn)
+			p.dedup = shmap.NewMapFuncs[rowHash, struct{}](hfn, eqfn)
 		}
 		if dir == Prev && !p.indexed {
-			p.buildMap(th)
+			p.buildDedup(th)
 		}
 	}
 	for {
@@ -670,7 +651,7 @@ func (p *Project) getMap(th *Thread, dir Dir) Row {
 		if row == nil {
 			break
 		}
-		oldRow, existed := p.addResult(th, row)
+		oldRow, existed := p.dedupRow(th, row)
 		if !existed || row.SameAs(oldRow) {
 			return row
 		}
@@ -682,6 +663,7 @@ func (p *Project) getMap(th *Thread, dir Dir) Row {
 }
 
 func hashCols(row Row, hdr *Header, cols []string, th *Thread, st *SuTran) uint64 {
+	assert.That(th != nil)
 	h := uint64(31)
 	for _, col := range cols {
 		x := row.GetRawVal(hdr, col, th, st)
@@ -690,6 +672,7 @@ func hashCols(row Row, hdr *Header, cols []string, th *Thread, st *SuTran) uint6
 	return h
 }
 func equalCols(x, y Row, hdr *Header, cols []string, th *Thread, st *SuTran) bool {
+	assert.That(th != nil)
 	for _, col := range cols {
 		if x.GetRawVal(hdr, col, th, st) != y.GetRawVal(hdr, col, th, st) {
 			return false
@@ -698,28 +681,28 @@ func equalCols(x, y Row, hdr *Header, cols []string, th *Thread, st *SuTran) boo
 	return true
 }
 
-func (p *Project) buildMap(th *Thread) {
+func (p *Project) buildDedup(th *Thread) {
 	for {
 		row := p.source.Get(th, Next)
 		if row == nil {
 			break
 		}
-		p.addResult(th, row)
+		p.dedupRow(th, row)
 	}
 	p.source.Rewind()
 	p.indexed = true
 }
 
-// addResult returns the old row and true if it already existed,
+// dedupRow returns the old row and true if it already existed,
 // else the new row and false
-func (p *Project) addResult(th *Thread, row Row) (Row, bool) {
+func (p *Project) dedupRow(th *Thread, row Row) (Row, bool) {
 	rh := rowHash{row: row,
-		hash: hashCols(row, p.source.Header(), p.columns, th, p.st)}
-	k, existed := p.results.GetInit(rh)
+		hash: hashCols(row, p.Header(), p.columns, th, p.st)}
+	k, existed := p.dedup.GetInit(rh)
 	if existed {
 		return k.row, true
 	} else {
-		if !p.warned && p.results.Size() > mapWarn {
+		if !p.warned && p.dedup.Size() > mapWarn {
 			p.warned = true
 			Warning("project-map large >", mapWarn)
 		}
@@ -727,7 +710,7 @@ func (p *Project) addResult(th *Thread, row Row) (Row, bool) {
 		if !p.derivedWarned && p.derived > derivedWarn {
 			p.derivedWarned = true
 			Warning("project-map derived large >",
-				derivedWarn, "average", p.derived/p.results.Size())
+				derivedWarn, "average", p.derived/p.dedup.Size())
 		}
 		return row, false
 	}
@@ -744,8 +727,11 @@ func (p *Project) Select(sels Sels) {
 	p.nsels++
 	p.source.Select(sels)
 	p.indexed = false
-	if p.results != nil {
-		p.results.Clear()
+	if p.dedup != nil {
+		p.dedup.Clear()
+		p.derived = 0
+		p.derivedWarned = false
+		p.warned = false
 	}
 	p.rewind()
 }
@@ -758,15 +744,8 @@ func (p *Project) Lookup(th *Thread, sels Sels) Row {
 	return lookupViaSelectGet(p, th, sels)
 }
 
-func (p *Project) getLookupCost() Cost {
-	srcCost := p.source.lookupCost()
-	if p.unique {
-		return srcCost
-	}
-	return 2 * srcCost // ??? (matches Nrows)
-}
-
 func (p *Project) Simple(th *Thread) []Row {
+	assert.That(th != nil)
 	hdr := p.Header()
 	dst := 0
 	rows := p.source.Simple(th)

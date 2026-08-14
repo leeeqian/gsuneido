@@ -38,7 +38,7 @@ func initRand(th *Thread) {
 
 var randomMethods = methods("rnd")
 
-var _ = staticMethod(rnd_Seed, "(seed) :void")
+var _ = staticMethod(rnd_Seed, "(seed :number) :void")
 
 func rnd_Seed(th *Thread, args []Value) Value {
 	seed := uint64(IfInt(args[0]))
@@ -62,10 +62,8 @@ func rnd_Bytes(arg Value) Value {
 var _ = staticMethod(rnd_Members, "() :object")
 
 func rnd_Members() Value {
-	return rnd_members
+	return methodList(randomMethods)
 }
-
-var rnd_members = methodList(randomMethods)
 
 func (r *suRandomGlobal) Lookup(th *Thread, method string) Value {
 	if f, ok := randomMethods[method]; ok {

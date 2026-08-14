@@ -12,6 +12,7 @@ import (
 	"github.com/apmckinlay/gsuneido/db19/index/ixkey"
 	"github.com/apmckinlay/gsuneido/db19/meta"
 	"github.com/apmckinlay/gsuneido/util/assert"
+	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/set"
 	"github.com/apmckinlay/gsuneido/util/slc"
 	"github.com/apmckinlay/gsuneido/util/str"
@@ -52,6 +53,7 @@ type Table struct {
 	singleton   bool
 	indexEncode bool
 	cursorMode  bool
+	req         Require
 }
 
 func (tbl *Table) isSingleton() bool {
@@ -62,8 +64,20 @@ func (tbl *Table) schemaIndexes() []Index {
 	return tbl.schema.Indexes
 }
 
+// UniqueIndexes returns the columns of the unique ('u') indexes
+func (tbl *Table) UniqueIndexes() [][]string {
+	var result [][]string
+	for i := range tbl.schema.Indexes {
+		if tbl.schema.Indexes[i].Mode == 'u' {
+			result = append(result, tbl.schema.Indexes[i].Columns)
+		}
+	}
+	return result
+}
+
 type tableApproach struct {
 	index []string
+	mode  Mode
 }
 
 func (tbl *Table) String() string {
@@ -159,22 +173,32 @@ const ( // ???
 
 func (tbl *Table) optimize(mode Mode, req Require) (Cost, Cost, any) {
 	if tbl.singleton || req.use == ReqNone {
-		return tbl.costFor(tbl.indexes[0], req)
+		return tbl.costFor(tbl.indexes[0], mode, req)
 	}
 	best := newBest[[]string]()
-	for _, idx := range tbl.indexes {
+	for i, idx := range tbl.indexes {
+		if req.use == ReqUnique && !tbl.uniqueForLookup(i) {
+			continue
+		}
 		if req.SatisfiedBy(idx) {
-			f, v, _ := tbl.costFor(idx, req)
+			f, v, _ := tbl.costFor(idx, mode, req)
 			best.update(f, v, idx)
 		}
 	}
 	if best.none() {
 		return impossible, impossible, nil
 	}
-	return best.fixcost, best.varcost, tableApproach{index: best.data}
+	return best.fixcost, best.varcost, tableApproach{index: best.data, mode: mode}
 }
 
-func (tbl *Table) costFor(index []string, req Require) (Cost, Cost, any) {
+// uniqueForLookup returns whether a Lookup on this index yields at most one row.
+// Unique 'u' indexes allow multiple all-empty entries
+// so they are not usable for Lookup.
+func (tbl *Table) uniqueForLookup(i int) bool {
+	return tbl.schema.Indexes[i].Mode != 'u'
+}
+
+func (tbl *Table) costFor(index []string, mode Mode, req Require) (Cost, Cost, any) {
 	rowCost := tableFast
 	if tbl.info.Size > tableLarge && !slices.Equal(index, tbl.indexes[0]) {
 		rowCost = tableSlow
@@ -185,17 +209,20 @@ func (tbl *Table) costFor(index []string, req Require) (Cost, Cost, any) {
 	if req.nseeks > 0 {
 		idxi := slc.IndexFn(tbl.indexes, index, slices.Equal)
 		if idxi != -1 {
-			result += Cost(req.nseeks) * tbl.lookupCostFor(idxi)
+			result += Cost(req.nseeks) * tbl.lookupCostI(idxi)
 		}
 	}
-	return 0, result, tableApproach{index: index}
+	return 0, result, tableApproach{index: index, mode: mode}
 }
 
-func (tbl *Table) setApproach(_ Require, approach any, _ QueryTran) {
-	tbl.SetIndex(approach.(tableApproach).index)
+func (tbl *Table) setApproach(req Require, approach any, _ QueryTran) {
+	tbl.req = req
+	ap := approach.(tableApproach)
+	tbl.setIndex(ap.index, ap.mode)
 }
 
-func (tbl *Table) SetIndex(index []string) {
+func (tbl *Table) setIndex(index []string, mode Mode) {
+	tbl.cursorMode = (mode == CursorMode)
 	if tbl.singleton {
 		index = tbl.allKeys[0]
 	}
@@ -205,8 +232,15 @@ func (tbl *Table) SetIndex(index []string) {
 	IdxUse(tbl.name, tbl.index)
 }
 
+// SetIndex sets the index used to access the table.
+// It also sets req to ReqAny so that Select and Lookup can be used.
+func (tbl *Table) SetIndex(index []string, mode Mode) {
+	tbl.setIndex(index, mode)
+	tbl.req = Require{use: ReqAny}
+}
+
 // IndexEncodes returns whether the index key is encoded
-// (multi-field or unique with Fields2)
+// (multi-field or non-key, i.e. has BestKey appended or Fields2)
 func (tbl *Table) IndexEncodes(index []string) bool {
 	return len(index) > 1 ||
 		!slc.ContainsFn(tbl.allKeys, index, set.Equal[string])
@@ -218,21 +252,12 @@ func (tbl *Table) indexi(index []string) int {
 	return i
 }
 
-func (tbl *Table) lookupCost() Cost {
-	var levels int
-	if tbl.info.Indexes == nil { // tests
-		levels = 1
-		if tbl.info.Nrows > 100 {
-			levels = 2
-		}
-	} else {
-		levels = tbl.info.Indexes[0].BtreeLevels()
-		//TODO should be the actual index but we don't have it
-	}
-	return lookupCost(levels)
+func (tbl *Table) lookupCost(idx []string) Cost {
+	return tbl.lookupCostI(tbl.indexi(idx))
+
 }
 
-func (tbl *Table) lookupCostFor(i int) Cost {
+func (tbl *Table) lookupCostI(i int) Cost {
 	var levels int
 	if tbl.info.Indexes == nil { // tests
 		levels = 1
@@ -242,35 +267,40 @@ func (tbl *Table) lookupCostFor(i int) Cost {
 	} else {
 		levels = tbl.info.Indexes[i].BtreeLevels()
 	}
-	return lookupCost(levels)
-}
-
-func lookupCost(levels int) Cost {
 	return levels*800 - 300 // empirical
 }
 
 // execution --------------------------------------------------------
 
 func (tbl *Table) Lookup(_ *Thread, sels Sels) Row {
-	assert.That(!selConflict(tbl.header.Columns, sels))
+	dbg.Assert(func() bool { return checkSels(sels, tbl.header.Columns) })
 	tbl.nlooks++
 	key := ""
 	if !tbl.singleton {
+		assert.That(tbl.req.use == ReqUnique || tbl.req.use == ReqAny)
 		ix := &tbl.schema.Indexes[tbl.iIndex]
 		key = selOrg(tbl.indexEncode, ix.Fields, sels, true)
-		if len(ix.Ixspec.Fields2) > 0 && key == "" {
-			fullFields := set.Union(ix.Fields, ix.BestKey)
-			key = selOrg(true, fullFields, sels, true)
+		// unique indexes ('u') allow multiple empty entries (via Fields2)
+		// so a Lookup is only valid when the key is non-empty
+		assert.That(ix.Mode != 'u' || key != "")
+	}
+	return tbl.LookupRaw(key)
+}
+
+func checkSels(sels Sels, srcCols []string) bool {
+	for _, sel := range sels {
+		if !slices.Contains(srcCols, sel.col) {
+			return false
 		}
 	}
-	row := tbl.LookupRaw(key)
-	if row == nil || !singletonFilter(tbl.header, row, sels) {
-		return nil
-	}
-	return row
+	return true
 }
 
 func (tbl *Table) LookupRaw(key string) Row {
+	// unique indexes ('u') allow multiple empty entries (via Fields2)
+	// so an empty key can't be used to find them by value alone;
+	// a non-empty key is fine since Fields2 is only appended to empty entries
+	assert.That(tbl.schema.Indexes[tbl.iIndex].Mode != 'u' || key != "")
 	rec := tbl.tran.Lookup(tbl.name, tbl.iIndex, key)
 	if rec == nil {
 		return nil
@@ -326,6 +356,9 @@ func (tbl *Table) GetFilter(dir Dir, filter func(key string) bool) Row {
 }
 
 func (tbl *Table) Select(sels Sels) {
+	// singleton doesn't use an index range - it filters (via singletonFilter
+	// in GetFilter) after a full scan, so it supports Select regardless of
+	// tbl.req.use.
 	tbl.nsels++
 	if tbl.singleton {
 		tbl.sels = sels
@@ -336,7 +369,9 @@ func (tbl *Table) Select(sels Sels) {
 		tbl.ensureIter().Range(iface.All)
 		return
 	}
-	assert.That(!selConflict(tbl.header.Columns, sels))
+	assert.That(tbl.req.use == ReqAny ||
+		tbl.req.use == ReqGroup || tbl.req.use == ReqOrder)
+	dbg.Assert(func() bool { return checkSels(sels, tbl.header.Columns) })
 	org, end := selKeys(tbl.indexEncode, tbl.index, sels)
 	tbl.SelectRaw(org, end)
 }
@@ -429,7 +464,8 @@ const maxSimple = 2000
 
 func (tbl *Table) Simple(*Thread) []Row {
 	// can't use info.Nrows because sizeTran overrides it for tests
-	tbl.ensureIter()
+	tbl.Select(nil)
+	tbl.Rewind()
 	rows := make([]Row, 0, 8)
 	for {
 		tbl.iter.Next(tbl.tran)

@@ -14,7 +14,7 @@ type suLruCacheGlobal struct {
 }
 
 func init() {
-	ps := params("(getfn, size=10, okForResetAll?=true)")
+	ps := params("(getfn, size=10, okForResetAll? :boolean =true)")
 	Global.Builtin("LruCache", &suLruCacheGlobal{
 		SuBuiltin{Fn: lruCacheCallClass,
 			BuiltinParams: BuiltinParams{ParamSpec: ps}}})
@@ -44,10 +44,8 @@ func lruStatic_ResetAll(th *Thread, _ []Value) Value {
 var _ = staticMethod(lruStatic_Members, "() :object")
 
 func lruStatic_Members() Value {
-	return lruStatic_members
+	return methodList(lruStaticMethods)
 }
-
-var lruStatic_members = methodList(lruStaticMethods)
 
 func (lc *suLruCacheGlobal) Lookup(th *Thread, method string) Value {
 	if f, ok := lruStaticMethods[method]; ok {

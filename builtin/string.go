@@ -91,7 +91,7 @@ func string_Compile(th *Thread, this Value, args []Value) Value {
 	return val
 }
 
-var _ = method(string_Count, "(string) :number")
+var _ = method(string_Count, "(string :string) :number")
 
 func string_Count(this, arg Value) Value {
 	return IntVal(strings.Count(ToStr(this), ToStr(arg)))
@@ -158,7 +158,7 @@ func string_Extract(th *Thread, this Value, args []Value) Value {
 	return SuStr(s[pos:end])
 }
 
-var _ = method(string_Find, "(string, pos=0) :number")
+var _ = method(string_Find, "(string :string, pos=0) :number")
 
 func string_Find(this, arg1, arg2 Value) Value {
 	s := ToStr(this)
@@ -170,7 +170,7 @@ func string_Find(this, arg1, arg2 Value) Value {
 	return IntVal(pos + i)
 }
 
-var _ = method(string_Find1of, "(chars, pos=0) :number")
+var _ = method(string_Find1of, "(chars :string, pos=0) :number")
 
 func string_Find1of(this, arg1, arg2 Value) Value {
 	s := ToStr(this)
@@ -182,7 +182,7 @@ func string_Find1of(this, arg1, arg2 Value) Value {
 	return IntVal(pos + i)
 }
 
-var _ = method(string_FindLast, "(string, pos=false) :false|number")
+var _ = method(string_FindLast, "(string :string, pos=false) :false|number")
 
 func string_FindLast(this, arg1, arg2 Value) Value {
 	s := ToStr(this)
@@ -203,7 +203,7 @@ func string_FindLast(this, arg1, arg2 Value) Value {
 	return intOrFalse(strings.LastIndex(s[:end], substr))
 }
 
-var _ = method(string_FindLast1of, "(chars, pos=false) :false|number")
+var _ = method(string_FindLast1of, "(chars :string, pos=false) :false|number")
 
 func string_FindLast1of(this, arg1, arg2 Value) Value {
 	set := ToStr(arg1)
@@ -231,7 +231,7 @@ func string_FromUtf8(this Value) Value {
 	return SuStr(s)
 }
 
-var _ = method(string_HasQ, "(string) :boolean")
+var _ = method(string_HasQ, "(string :string) :boolean")
 
 func string_HasQ(this, arg Value) Value {
 	return SuBool(strings.Contains(ToStr(this), ToStr(arg)))
@@ -264,26 +264,26 @@ func string_LowerQ(this Value) Value {
 	return SuBool(result)
 }
 
-var _ = method(string_MapN, "(n, block) :string")
+var _ = method(string_MapN, "(n :number, block) :string")
 
 func string_MapN(th *Thread, this Value, args []Value) Value {
 	s := ToStr(this)
 	n := IfInt(args[0])
 	block := args[1]
-	var buf strings.Builder
-	buf.Grow(len(s)) // ???
+	var sb strings.Builder
+	sb.Grow(len(s)) // ???
 	for i := 0; i < len(s); i += n {
 		end := min(i+n, len(s))
 		val := th.Call(block, SuStr1(s[i:end]))
 		if val != nil {
-			buf.WriteString(AsStr(val))
-			CheckStringSize("MapN", buf.Len())
+			sb.WriteString(AsStr(val))
+			CheckStringSize("MapN", sb.Len())
 		}
 	}
-	return SuStr(buf.String())
+	return SuStr(sb.String())
 }
 
-var _ = method(string_Match, "(pattern, pos=false, prev=false) :false|object")
+var _ = method(string_Match, "(pattern, pos=false, prev :boolean =false) :false|object")
 
 func string_Match(th *Thread, this Value, args []Value) Value {
 	s := ToStr(this)
@@ -368,7 +368,7 @@ func string_NumericQ(this Value) Value {
 	return True
 }
 
-var _ = method(string_PrefixQ, "(string, pos=0) :boolean")
+var _ = method(string_PrefixQ, "(string :string, pos=0) :boolean")
 
 func string_PrefixQ(this, arg1, arg2 Value) Value {
 	s := ToStr(this)
@@ -424,7 +424,7 @@ func string_Size(this Value) Value {
 	// "this" should always have Len
 }
 
-var _ = method(string_Split, "(separator = '') :object")
+var _ = method(string_Split, "(separator :string = '') :object")
 
 func string_Split(this, arg Value) Value {
 	s := ToStr(this)
@@ -448,7 +448,7 @@ func string_Split(this, arg Value) Value {
 	return NewSuObject(vals)
 }
 
-var _ = method(string_SuffixQ, "(string) :boolean")
+var _ = method(string_SuffixQ, "(string :string) :boolean")
 
 func string_SuffixQ(this, arg Value) Value {
 	return SuBool(strings.HasSuffix(ToStr(this), ToStr(arg)))
@@ -484,7 +484,7 @@ func string_ToUtf8(this Value) Value {
 	return SuStr(utf8)
 }
 
-var _ = method(string_Tr, "(from, to='') :string")
+var _ = method(string_Tr, "(from :string, to :string ='') :string")
 
 func string_Tr(th *Thread, this Value, args []Value) Value {
 	from := th.TrSet(args[0])
@@ -496,14 +496,14 @@ var _ = method(string_Unescape, "() :string")
 
 func string_Unescape(this Value) Value {
 	s := ToStr(this)
-	var buf strings.Builder
-	buf.Grow(len(s))
+	var sb strings.Builder
+	sb.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		var c byte
 		c, i = str.Doesc(s, i)
-		buf.WriteByte(c)
+		sb.WriteByte(c)
 	}
-	return SuStr(buf.String())
+	return SuStr(sb.String())
 }
 
 var _ = method(string_Upper, "() :string")
@@ -548,7 +548,7 @@ func replace(th *Thread, s string, patarg Value, reparg Value, count int) string
 
 	from := -1
 	nreps := 0
-	var buf strings.Builder
+	var sb strings.Builder
 	for cap := range pat.All(s) {
 		pos, end := cap[0], cap[1]
 
@@ -567,16 +567,16 @@ func replace(th *Thread, s string, patarg Value, reparg Value, count int) string
 		if from == -1 { // no changes to original string yet
 			if r != s[pos:end] {
 				// initialize buffer only when we know we need to make changes
-				buf.Grow(len(s)) // ???
-				buf.WriteString(s[0:pos])
+				sb.Grow(len(s)) // ???
+				sb.WriteString(s[0:pos])
 				from = int(end)
-				buf.WriteString(r)
+				sb.WriteString(r)
 			}
 		} else {
 			// if we've already started making changes, continue appending
-			buf.WriteString(s[from:pos])
+			sb.WriteString(s[from:pos])
 			from = int(end)
-			buf.WriteString(r)
+			sb.WriteString(r)
 		}
 
 		nreps++
@@ -590,9 +590,9 @@ func replace(th *Thread, s string, patarg Value, reparg Value, count int) string
 	}
 
 	if from < len(s) {
-		buf.WriteString(s[from:])
+		sb.WriteString(s[from:])
 	}
-	return buf.String()
+	return sb.String()
 }
 
 func callable(v Value) bool {
