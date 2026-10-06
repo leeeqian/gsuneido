@@ -17,7 +17,7 @@ import (
 	"github.com/apmckinlay/gsuneido/util/assert"
 )
 
-type Map[K any, V any, H helper[K]] struct {
+type Map[K any, V any, H Helper[K]] struct {
 	groups     []group[K, V] // size is power of 2
 	count      int32
 	growthLeft int32
@@ -43,15 +43,21 @@ const loadFactor = 7 // i.e. 7 / 8
 
 //-------------------------------------------------------------------
 
-// helper is used to allow custom hash and equals functions
-type helper[K any] interface {
+// Helper is used to allow custom hash and equals functions
+type Helper[K any] interface {
 	Hash(k K) uint64
 	Equal(x, y K) bool
 }
 
+// NewMap returns a Map using the provided helper,
+// allowing custom key types (and access to context via the helper).
+func NewMap[K any, V any, H Helper[K]](h H) *Map[K, V, H] {
+	return &Map[K, V, H]{help: h}
+}
+
 // NewMapMeth returns a Map that calls Hash and Equal methods on the key
 func NewMapMeth[K Key, V any]() *Map[K, V, Meth[K]] {
-	return &Map[K, V, Meth[K]]{help: Meth[K]{}}
+	return NewMap[K, V](Meth[K]{})
 }
 
 type Meth[K Key] struct{}
@@ -73,7 +79,7 @@ func (Meth[K]) Equal(x, y K) bool {
 func NewMapFuncs[K any, V any](
 	hfn func(k K) uint64,
 	eqfn func(x, y K) bool) *Map[K, V, Funcs[K]] {
-	return &Map[K, V, Funcs[K]]{help: Funcs[K]{hfn: hfn, eqfn: eqfn}}
+	return NewMap[K, V](Funcs[K]{hfn: hfn, eqfn: eqfn})
 }
 
 type Funcs[K any] struct {
@@ -376,7 +382,6 @@ func (m *Map[K, V, H]) Iter() func() (K, V, bool) {
 		return func() (k K, v V, ok bool) { return }
 	}
 	gi := 0
-	grp := &m.groups[0]
 	i := -1
 	return func() (k K, v V, ok bool) {
 		if gi >= len(m.groups) {
@@ -388,8 +393,8 @@ func (m *Map[K, V, H]) Iter() func() (K, V, bool) {
 				if gi++; gi >= len(m.groups) {
 					return
 				}
-				grp = &m.groups[gi]
 			}
+			grp := &m.groups[gi]
 			c := uint8(grp.control >> (i * 8))
 			if c&0x80 != 0 {
 				return grp.keys[i], grp.vals[i], true
@@ -398,8 +403,8 @@ func (m *Map[K, V, H]) Iter() func() (K, V, bool) {
 	}
 }
 
-// Copy makes a shallow copy of the map
-func (m *Map[K, V, H]) Copy() *Map[K, V, H] {
+// Clone makes a shallow copy of the map
+func (m *Map[K, V, H]) Clone() *Map[K, V, H] {
 	newMap := *m
 	newMap.groups = slices.Clone(m.groups)
 	return &newMap

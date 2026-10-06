@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19/index/iface"
 	"github.com/apmckinlay/gsuneido/util/assert"
 	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/set"
@@ -35,10 +36,10 @@ type Summarize struct {
 	sels Sels
 	summarizeApproach
 	wholeRow bool
-	state
-	unique bool
-	hint   sumHint
-	th     *Thread
+	state    iface.State
+	unique   bool
+	hint     sumHint
+	th       *Thread
 }
 
 type summarizeApproach struct {
@@ -93,14 +94,14 @@ func NewSummarize(src Query, hint sumHint, by, cols, ops, ons []string) *Summari
 		panic("summarize: nonexistent columns: " +
 			str.Join(", ", set.Difference(by, src.Columns())))
 	}
-	cols = checkSummarize(by, cols, ops, ons)
 	su := &Summarize{hint: hint, by: by, cols: cols, ops: ops, ons: ons}
 	su.source = src
-	sort.Stable(su)
 	su.unique = hasKey(by, src.Keys(), src.Fixed())
 	// if single min or max, and on is a key, then we can give the whole row
 	su.wholeRow = su.minmax1() &&
 		(slc.ContainsFn(src.Keys(), ons, set.Equal[string]) || isEmptyKey(src.Keys()))
+	su.checkSummarize()
+	sort.Stable(su)
 	su.header = su.getHeader()
 	su.keys = projectKeys(src.Keys(), su.by)
 	su.indexes = projectIndexes(src.Indexes(), su.by)
@@ -111,31 +112,45 @@ func NewSummarize(src Query, hint sumHint, by, cols, ops, ons []string) *Summari
 	return su
 }
 
-func checkSummarize(by, cols, ops, ons []string) []string {
-	check(by)
-	check(ons)
-	if conflict := set.Intersect(by, ons); len(conflict) > 0 {
+func (su *Summarize) minmax1() bool {
+	return len(su.by) == 0 &&
+		len(su.ops) == 1 && (su.ops[0] == "min" || su.ops[0] == "max")
+}
+
+func (su *Summarize) checkSummarize() {
+	checkLower(su.by)
+	checkLower(su.ons)
+	if conflict := set.Intersect(su.by, su.ons); len(conflict) > 0 {
 		panic("summarize: by and on columns conflict: " + str.Join(", ", conflict))
 	}
-	seen := make(map[string]struct{}, len(cols))
-	for i := range len(cols) {
-		if cols[i] == "" {
-			cols[i] = defaultColName(ops[i], ons[i])
+	seen := make(map[string]struct{}, len(su.cols))
+	for i := range len(su.cols) {
+		if su.cols[i] == "" {
+			su.cols[i] = defaultColName(su.ops[i], su.ons[i])
 		}
-		if _, dup := seen[cols[i]]; dup {
-			panic("summarize: duplicate output column: " + cols[i])
+		if _, dup := seen[su.cols[i]]; dup {
+			panic("summarize: duplicate output column: " + su.cols[i])
 		}
-		seen[cols[i]] = struct{}{}
+		seen[su.cols[i]] = struct{}{}
 	}
-	if conflict := set.Intersect(by, cols); len(conflict) > 0 {
+	if conflict := set.Intersect(su.by, su.cols); len(conflict) > 0 {
 		panic("summarize: output columns conflict with by: " +
 			str.Join(", ", conflict))
 	}
-	if conflict := set.Intersect(nonEmpty(ons), cols); len(conflict) > 0 {
-		panic("summarize: on columns conflict with output columns: " +
-			str.Join(", ", conflict))
+	// whole row output carries the source columns, so a computed column with
+	// the same name would be shadowed by a source column
+	if su.wholeRow && !set.Disjoint(su.cols, su.source.Columns()) {
+		panic("summarize: output columns conflict with source columns: " +
+			str.Join(", ", set.Intersect(su.cols, su.source.Columns())))
 	}
-	return cols
+}
+
+func checkLower(cols []string) {
+	for _, c := range cols {
+		if strings.HasSuffix(c, "_lower!") {
+			panic("can't summarize _lower! fields")
+		}
+	}
 }
 
 func defaultColName(op, on string) string {
@@ -143,16 +158,6 @@ func defaultColName(op, on string) string {
 		return "count"
 	}
 	return op + "_" + on
-}
-
-func nonEmpty(cols []string) []string {
-	result := make([]string, 0, len(cols))
-	for _, c := range cols {
-		if c != "" {
-			result = append(result, c)
-		}
-	}
-	return result
 }
 
 // Len / Less / Swap implement sort.Interface
@@ -166,19 +171,6 @@ func (su *Summarize) Swap(i, j int) {
 	su.ons[i], su.ons[j] = su.ons[j], su.ons[i]
 	su.cols[i], su.cols[j] = su.cols[j], su.cols[i]
 	su.ops[i], su.ops[j] = su.ops[j], su.ops[i]
-}
-
-func check(cols []string) {
-	for _, c := range cols {
-		if strings.HasSuffix(c, "_lower!") {
-			panic("can't summarize _lower! fields")
-		}
-	}
-}
-
-func (su *Summarize) minmax1() bool {
-	return len(su.by) == 0 &&
-		len(su.ops) == 1 && (su.ops[0] == "min" || su.ops[0] == "max")
 }
 
 func (su *Summarize) SetTran(t QueryTran) {
@@ -371,7 +363,7 @@ func (su *Summarize) optMap(mode Mode, req Require) (Cost, Cost, any) {
 	// unlike Project, we don't multiply by req.frac
 	// because we have to process the entire source
 	// regardless of how much the parent needs
-	mapBuild := Cost(srcNrows) * mapCost
+	mapBuild := srcNrows * mapCost
 	// since the map has to be built up front, we add it to fixcost
 	fixcost := srcFixcost + srcVarcost + mapBuild
 	return fixcost, 0, &summarizeApproach{strat: sumMap, req: srcReq}
@@ -404,7 +396,7 @@ func (su *Summarize) setApproach(_ Require, approach any, tran QueryTran) {
 		assert.ShouldNotReachHere()
 	}
 	su.source = SetApproach(su.source, su.summarizeApproach.req, tran)
-	su.state = rewound
+	su.state = iface.Rewound
 	su.header = su.getHeader()
 }
 
@@ -429,21 +421,21 @@ func (su *Summarize) getColumns() []string {
 
 func (su *Summarize) Rewind() {
 	su.source.Rewind()
-	su.state = rewound
+	su.state = iface.Rewound
 }
 
 func (su *Summarize) Get(th *Thread, dir Dir) Row {
 	defer func(t uint64) { su.tget += tsc.Read() - t }(tsc.Read())
-	if su.state == eof {
+	if su.state.Eof() {
 		return nil
 	}
 	for {
 		row := su.get(th, su, dir)
 		if row == nil {
-			su.state = eof
+			su.state = iface.Eof
 			return nil
 		}
-		su.state = within
+		su.state = iface.Within
 		if su.filter(row, th) {
 			su.ngets++
 			return row
@@ -452,10 +444,10 @@ func (su *Summarize) Get(th *Thread, dir Dir) Row {
 }
 
 func getTbl(_ *Thread, su *Summarize, dir Dir) Row {
-	if su.state == within {
+	if su.state.Within() {
 		return nil
 	}
-	su.state = within
+	su.state = iface.Within
 	nr, _ := su.source.Nrows()
 	if nr == 0 {
 		return nil
@@ -466,10 +458,10 @@ func getTbl(_ *Thread, su *Summarize, dir Dir) Row {
 }
 
 func getIdx(th *Thread, su *Summarize, _ Dir) Row {
-	if su.state == within {
+	if su.state.Within() {
 		return nil
 	}
-	su.state = within
+	su.state = iface.Within
 	dir := Prev // max
 	if str.EqualCI(su.ops[0], "min") {
 		dir = Next
@@ -525,9 +517,9 @@ type mapPair struct {
 func (t *sumMapT) getMap(th *Thread, su *Summarize, dir Dir) Row {
 	su.th = th
 	defer func() { su.th = nil }()
-	if su.state == rewound {
+	if su.state.Rewound() {
 		assert.That(!su.wholeRow)
-		su.state = within // before buildMap (Get loop might call getMap again)
+		su.state = iface.Within // before buildMap (Get loop might call getMap again)
 		t.mapList = su.buildMap()
 		if dir == Next {
 			t.mapPos = -1
@@ -544,9 +536,10 @@ func (t *sumMapT) getMap(th *Thread, su *Summarize, dir Dir) Row {
 		return nil
 	}
 	row := t.mapList[t.mapPos].row
+	rr := NewRowRec(row, su.source.Header(), th, su.st)
 	var rb RecordBuilder
 	for _, col := range su.by {
-		rb.AddRaw(row.GetRawVal(su.source.Header(), col, th, su.st))
+		rb.AddRaw(rr.GetRawVal(col))
 	}
 	ops := t.mapList[t.mapPos].ops
 	for i := range ops {
@@ -595,9 +588,11 @@ func (su *Summarize) buildMap() []mapPair {
 	}
 	if sortForTest {
 		sort.Slice(list, func(i, j int) bool {
+			rri := NewRowRec(list[i].row, hdr, su.th, su.st)
+			rrj := NewRowRec(list[j].row, hdr, su.th, su.st)
 			for _, col := range su.by {
-				xi := list[i].row.GetRawVal(hdr, col, su.th, su.st)
-				xj := list[j].row.GetRawVal(hdr, col, su.th, su.st)
+				xi := rri.GetRawVal(col)
+				xj := rrj.GetRawVal(col)
 				if xi != xj {
 					return xi < xj
 				}
@@ -618,8 +613,8 @@ type sumSeqT struct {
 }
 
 func (t *sumSeqT) getSeq(th *Thread, su *Summarize, dir Dir) Row {
-	if su.state == rewound {
-		su.state = within // clear before source.Get (filter loop might call getSeq again)
+	if su.state.Rewound() {
+		su.state = iface.Within // clear before source.Get (filter loop might call getSeq again)
 		t.sums = su.newSums()
 		t.curDir = dir
 		t.curRow = nil
@@ -668,6 +663,7 @@ func (t *sumSeqT) getSeq(th *Thread, su *Summarize, dir Dir) Row {
 }
 
 func (su *Summarize) addToSums(sums []sumOp, row Row, th *Thread, st *SuTran) {
+	rr := NewRowRec(row, su.source.Header(), th, st)
 	for i := 0; i < len(su.ons); {
 		raw := "*uninit*"
 		var val Value
@@ -677,7 +673,7 @@ func (su *Summarize) addToSums(sums []sumOp, row Row, th *Thread, st *SuTran) {
 				sums[i].add("", nil, row)
 			case "list", "min", "max":
 				if raw == "*uninit*" {
-					raw = row.GetRawVal(su.source.Header(), col, th, st)
+					raw = rr.GetRawVal(col)
 				}
 				sums[i].add(raw, nil, row)
 			default: // total, average
@@ -691,9 +687,10 @@ func (su *Summarize) addToSums(sums []sumOp, row Row, th *Thread, st *SuTran) {
 }
 
 func (su *Summarize) sameBy(th *Thread, st *SuTran, row1, row2 Row) bool {
+	rr1 := NewRowRec(row1, su.source.Header(), th, st)
+	rr2 := NewRowRec(row2, su.source.Header(), th, st)
 	for _, f := range su.by {
-		if row1.GetRawVal(su.source.Header(), f, th, st) !=
-			row2.GetRawVal(su.source.Header(), f, th, st) {
+		if rr1.GetRawVal(f) != rr2.GetRawVal(f) {
 			return false
 		}
 	}
@@ -703,8 +700,9 @@ func (su *Summarize) sameBy(th *Thread, st *SuTran, row1, row2 Row) bool {
 func (su *Summarize) seqRow(th *Thread, curRow Row, sums []sumOp) Row {
 	var rb RecordBuilder
 	if !su.wholeRow {
+		rr := NewRowRec(curRow, su.source.Header(), th, su.st)
 		for _, fld := range su.by {
-			rb.AddRaw(curRow.GetRawVal(su.source.Header(), fld, th, su.st))
+			rb.AddRaw(rr.GetRawVal(fld))
 		}
 	}
 	for _, sum := range sums {
@@ -724,12 +722,13 @@ func (su *Summarize) Select(sels Sels) {
 	isels, osels := Split(false, sels, su.index)
 	su.sels = osels
 	su.source.Select(isels)
-	su.state = rewound
+	su.state = iface.Rewound
 }
 
 func (su *Summarize) filter(row Row, th *Thread) bool {
+	rr := NewRowRec(row, su.header, th, su.st)
 	for _, sel := range su.sels {
-		x := row.GetRawVal(su.header, sel.col, th, su.st)
+		x := rr.GetRawVal(sel.col)
 		if x != sel.val {
 			return false
 		}
@@ -750,8 +749,9 @@ func (su *Summarize) Simple(th *Thread) []Row {
 	groups := make(map[string]*group)
 	for _, row := range srcRows {
 		var sb strings.Builder
+		rr := NewRowRec(row, hdr, th, su.st)
 		for _, col := range su.by {
-			sb.WriteString(row.GetRawVal(hdr, col, th, su.st))
+			sb.WriteString(rr.GetRawVal(col))
 			sb.WriteString("\x00")
 		}
 		key := sb.String()

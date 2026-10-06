@@ -46,16 +46,13 @@ func (dc *dbmsClient) NewSession() *muxSession {
 
 var _ IDbms = (*muxSession)(nil)
 
-func (ms *muxSession) Admin(admin string, _ *Sviews) {
+func (ms *muxSession) Admin(admin string, _ *Sviews, _ *Perms) {
 	ms.PutCmd(commands.Admin).PutStr(admin)
 	ms.Request()
 }
 
-func (ms *muxSession) Auth(th *Thread, s string) bool {
-	if s == "" {
-		return false
-	}
-	ms.PutCmd(commands.Auth).PutStr(s)
+func (ms *muxSession) Auth(th *Thread, data Value) bool {
+	ms.PutCmd(commands.Auth).PutVal(data)
 	ms.Request()
 	if ms.GetBool() {
 		if options.Mode == "gui" {
@@ -122,7 +119,7 @@ func (ms *muxSession) Connections() Value {
 	return ms.GetVal().(*SuObject)
 }
 
-func (ms *muxSession) Cursor(query string, _ *Sviews) ICursor {
+func (ms *muxSession) Cursor(query string, _ *Sviews, _ *Perms) ICursor {
 	ms.PutCmd(commands.Cursor).PutStr(query)
 	ms.Request()
 	cn := ms.GetInt()
@@ -216,18 +213,6 @@ func (ms *muxSession) Libraries() []string {
 	return ms.GetStrs()
 }
 
-func (ms *muxSession) Nonce(*Thread) string {
-	ms.PutCmd(commands.Nonce)
-	ms.Request()
-	return ms.GetStr_()
-}
-
-func (ms *muxSession) Run(_ *Thread, code string) Value {
-	ms.PutCmd(commands.Run).PutStr(code)
-	ms.Request()
-	return ms.ValueResult()
-}
-
 func (ms *muxSession) Schema(table string) string {
 	return ToStr(ms.Exec(nil, SuObjectOf(SuStr("Database.Schema"), SuStr(table))))
 }
@@ -255,13 +240,7 @@ func (ms *muxSession) Timestamp() SuDate {
 	return ms.GetVal().(SuDate)
 }
 
-func (ms *muxSession) Token() string {
-	ms.PutCmd(commands.Token)
-	ms.Request()
-	return ms.GetStr()
-}
-
-func (ms *muxSession) Transaction(update bool) ITran {
+func (ms *muxSession) Transaction(update bool, _ *Perms) ITran {
 	ms.PutCmd(commands.Transaction).PutBool(update)
 	ms.Request()
 	tn := ms.GetInt()
@@ -285,10 +264,6 @@ func (ms *muxSession) Use(lib string) bool {
 	}
 	panic("can't Use('" + lib + "')\n" +
 		"When client-server, only the server can Use")
-}
-
-func (ms *muxSession) Unwrap() IDbms {
-	return ms
 }
 
 func (ms *muxSession) getHdr() *Header {

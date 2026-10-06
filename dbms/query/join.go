@@ -38,7 +38,6 @@ type joinBase struct {
 	sel2        Sels // from an incoming Select, used by Get/filter2
 	qt          QueryTran
 	st          *SuTran
-	lookup      *lookupInfo
 	lookupCache lookupCache
 	by          []string
 	prevFixed1  Fixed
@@ -53,12 +52,6 @@ type joinBase struct {
 type Join struct {
 	joinBase
 	conflict bool
-}
-
-type lookupInfo struct {
-	keys1    [][]string
-	fixed1   Fixed
-	fallback bool
 }
 
 type joinApproach struct {
@@ -524,13 +517,6 @@ func (jn *Join) Lookup(th *Thread, sels Sels) Row {
 	// fmt.Println(jn.strategy(), "Lookup", cols, unpack(vals))
 	jn.nlooks++
 	sel1, sel2 := jn.splitSelect(sels)
-	if jn.lookupFallback(sel1) {
-		jn.rewind()
-		jn.source1.Select(sel1)
-		defer jn.Select(nil)
-		jn.sel2 = sel2
-		return getNext1(jn, th)
-	}
 	row1 := jn.source1.Lookup(th, sel1)
 	if row1 == nil {
 		return nil
@@ -553,40 +539,6 @@ func (jn *Join) Lookup(th *Thread, sels Sels) Row {
 	return JoinRows(row1, row2)
 }
 
-func (jb *joinBase) lookupFallback(sel1 Sels) bool {
-	if jb.lookup == nil { // memoize
-		jb.lookup = &lookupInfo{
-			keys1:  jb.source1.Keys(),
-			fixed1: jb.source1.Fixed(),
-		}
-	}
-	if !selHasKey(sel1, jb.lookup.keys1, jb.lookup.fixed1) {
-		// can't do lookup on source1
-		// this can happen (rarely) because there's no way to tell Optimize
-		// that we want to do lookups with the index
-		if !jb.lookup.fallback {
-			jb.lookup.fallback = true
-			// log.Println("INFO query", which, "Lookup fallback to Select & Get")
-			// fmt.Println("sel1cols", sel1cols, "keys1", jb.lookup.keys1, "fixed1", jb.lookup.fixed1)
-		}
-		return true
-	}
-	return false
-}
-
-func selHasKey(sels Sels, keys [][]string, fixed Fixed) bool {
-outer:
-	for _, key := range keys {
-		for _, k := range key {
-			if !fixed.Single(k) && !sels.HasCol(k) {
-				continue outer
-			}
-		}
-		return true
-	}
-	return false
-}
-
 func (jn *Join) Simple(th *Thread) []Row {
 	st := MakeSuTran(jn.qt)
 	rows1 := jn.source1.Simple(th)
@@ -603,13 +555,7 @@ func (jn *Join) Simple(th *Thread) []Row {
 }
 
 func (jb *joinBase) equalBy(th *Thread, st *SuTran, row1, row2 Row) bool {
-	for _, f := range jb.by {
-		if row1.GetRawVal(jb.source1.Header(), f, th, st) !=
-			row2.GetRawVal(jb.source2.Header(), f, th, st) {
-			return false
-		}
-	}
-	return true
+	return EqualRows(jb.source1.Header(), row1, jb.source2.Header(), row2, jb.by, th, st)
 }
 
 // LeftJoin ---------------------------------------------------------
@@ -846,12 +792,6 @@ func (lj *LeftJoin) Lookup(th *Thread, sels Sels) Row {
 	defer lj.Select(nil)
 	sel1, sel2 := lj.splitSelect(sels)
 	lj.sel2 = sel2
-	if lj.lookupFallback(sel1) {
-		// log.Println("INFO LeftJoin Lookup fallback to Select & Get")
-		lj.rewind()
-		lj.source1.Select(sel1)
-		return getNext1(lj, th)
-	}
 	row1 := lj.source1.Lookup(th, sel1)
 	if row1 == nil {
 		return nil

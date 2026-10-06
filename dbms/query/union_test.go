@@ -28,7 +28,7 @@ func TestUnion_MergeSwitchDir(t *testing.T) {
 	db.act("insert { a: 7 } into one")
 	db.act("insert { a: 8 } into two")
 	db.act("insert { a: 9 } into two")
-	tran := db.NewReadTran()
+	tran := db.NewReadTran(AllPerms)
 	q := ParseQuery("one union two", tran, nil)
 	q, _, _ = Setup(q, ReadMode, tran)
 	// fmt.Println(Format(q))
@@ -89,7 +89,7 @@ func TestUnion_DisjointRequiredIndexNoKey(t *testing.T) {
 		HeaderResult:  SimpleHeader([]string{"a", "k", "d"}),
 		IndexesResult: [][]string{index},
 		KeysResult:    [][]string{{"k"}},
-		FixedResult:   Fixed{NewFix("d", SuInt(1))},
+		FixedResult:   Fixed{NewFix("d", SuInt16(1))},
 		NrowsN:        1,
 		NrowsP:        1,
 		RowSizeResult: 1,
@@ -99,7 +99,7 @@ func TestUnion_DisjointRequiredIndexNoKey(t *testing.T) {
 		HeaderResult:  SimpleHeader([]string{"a", "k", "d"}),
 		IndexesResult: [][]string{index},
 		KeysResult:    [][]string{{"k"}},
-		FixedResult:   Fixed{NewFix("d", SuInt(2))},
+		FixedResult:   Fixed{NewFix("d", SuInt16(2))},
 		NrowsN:        1,
 		NrowsP:        1,
 		RowSizeResult: 1,

@@ -24,20 +24,10 @@ func TestQueryBug(t *testing.T) {
 	openDbms()
 	defer db.CloseKeepMapped()
 
-	query := `
-		(ap_checklines where apivc_invoice is "12567" 
-		join by(apchk_num) 
-		(ap_checks where bizpartner_num is #20260113.104240513110 
-			and apchk_void? isnt true 
-			and apchk_type is "CK" 
-		rename 
-			etaequipstmt_name to etaequipstmt_name_hdr, 
-			etaequipstmt_date to etaequipstmt_date_hdr, 
-			etaequip_num to etaequip_num_hdr
-		)) 
-		summarize max apchk_date, total apchklin_amount_paid`
+	query := `ap_checklines summarize apchk_num, apivc_invoice, 
+		apchklin_amount_paid = total apchklin_amount_paid`
 	args := SuObjectOf(SuStr(query))
-	dbmsLocal.Get(MainThread, args, Only)
+	dbmsLocal.Get(MainThread, args, Any)
 }
 
 func TestFastGet(t *testing.T) {
@@ -110,7 +100,7 @@ func BenchmarkFast(b *testing.B) {
 	}
 	args := &SuObject{}
 	args.Add(SuStr("stdlib"))
-	args.Set(SuStr("num"), SuInt(2))
+	args.Set(SuStr("num"), SuInt16(2))
 	for b.Loop() {
 		dbmsLocal.Get(MainThread, args, Only)
 	}

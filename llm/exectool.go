@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -35,7 +36,7 @@ var _ = addTool(toolSpec{
 		if err != nil {
 			return nil, err
 		}
-		return execTool(code)
+		return execTool(ctx, code)
 	},
 })
 
@@ -52,7 +53,7 @@ type execOutput struct {
 	Print    string       `json:"print,omitempty" jsonschema:"output from Print calls"`
 }
 
-func execTool(code string) (result execOutput, err error) {
+func execTool(ctx context.Context, code string) (result execOutput, err error) {
 	var savedCode string
 	var th *core.Thread
 	defer func() {
@@ -67,7 +68,7 @@ func execTool(code string) (result execOutput, err error) {
 		}
 	}()
 
-	th = core.NewThread(core.MainThread)
+	th = toolThread(ctx)
 	defer th.Close()
 
 	var printBuf strings.Builder
@@ -77,7 +78,7 @@ func execTool(code string) (result execOutput, err error) {
 			printBuf.WriteString(core.ToStr(s))
 			return nil
 		},
-		BuiltinParams: core.BuiltinParams{ParamSpec: core.ParamSpec1},
+		ParamSpec: core.ParamSpec1,
 	})
 	th.Suneido.Store(suneido)
 
@@ -97,9 +98,10 @@ func execTool(code string) (result execOutput, err error) {
 	if res != nil {
 		results = append(results, resultItem(th, res))
 	} else if len(th.ReturnMulti) > 0 {
-		for i := len(th.ReturnMulti) - 1; i >= 0; i-- {
-			results = append(results, resultItem(th, th.ReturnMulti[i]))
+		for _, v := range slices.Backward(th.ReturnMulti) {
+			results = append(results, resultItem(th, v))
 		}
+		th.ClearReturnMulti()
 	}
 	result = execOutput{
 		Code:     code,

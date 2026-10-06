@@ -6,9 +6,17 @@
 package dbms
 
 import (
+	"crypto/tls"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
+	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19"
+	"github.com/apmckinlay/gsuneido/db19/stor"
+	"github.com/apmckinlay/gsuneido/dbms/mux"
+	"github.com/apmckinlay/gsuneido/options"
 	"github.com/apmckinlay/gsuneido/util/assert"
 )
 
@@ -82,68 +90,69 @@ func TestLogWithLimitEmpty(t *testing.T) {
 	assert.This(sc.logSize.Load()).Is(int32(7)) // 1 + (5 + 1) = 7
 }
 
-// nonces
+func TestNewServerConnUnauthorized(t *testing.T) {
+	assert := assert.T(t)
 
-func TestNonceExpiration(t *testing.T) {
-	// Test multiple connections with different nonce states
-	sc1 := &serverConn{id: 1, nonce: "fresh-nonce", nonceOld: false}
-	sc2 := &serverConn{id: 2, nonce: "", nonceOld: false}         // no nonce
-	sc3 := &serverConn{id: 3, nonce: "old-nonce", nonceOld: true} // old nonce
+	options.BuiltDate = "Dec 29 2020 12:34"
+	db := db19.CreateDb(stor.HeapStor(8192))
+	dbmsLocal := NewDbmsLocal(db)
+	p1, p2 := net.Pipe()
+	workers = mux.NewWorkers(doRequest)
+	go newServerConn(dbmsLocal, p1, serverTLSConfig())
+	errmsg := checkHello(p2)
+	assert.This(errmsg).Is("")
+	p2.Write(hello())
+	tlsConn := tls.Client(p2, clientTLSConfig())
+	if err := tlsConn.Handshake(); err != nil {
+		panic(err)
+	}
+	c := NewDbmsClient(tlsConn)
+	ses := c.NewSession()
 
-	conns := map[uint32]*serverConn{1: sc1, 2: sc2, 3: sc3}
+	// Without Auth, the connection is unauthorized and Get should be rejected
+	assert.This(func() {
+		args := SuObjectOf(SuStr("tables sort table"))
+		ses.Get(nil, args, Next)
+	}).Panics("not authorized")
 
-	// Single expiry cycle should handle all states correctly
-	expireNoncesLocked(conns)
-
-	// Fresh nonce should be marked as old
-	assert.T(t).This(sc1.nonce).Is("fresh-nonce")
-	assert.T(t).This(sc1.nonceOld).Is(true)
-
-	// No nonce should remain unchanged
-	assert.T(t).This(sc2.nonce).Is("")
-	assert.T(t).This(sc2.nonceOld).Is(false)
-
-	// Old nonce should be deleted
-	assert.T(t).This(sc3.nonce).Is("")
-	assert.T(t).This(sc3.nonceOld).Is(false)
+	time.Sleep(25 * time.Millisecond)
 }
 
-func TestNonceConsumption(t *testing.T) {
-	// Test that auth clears nonce and resets nonceOld
-	sc := &serverConn{nonce: "test-nonce", nonceOld: true}
-	ss := &serverSession{sc: sc}
+func TestUnauthCmds(t *testing.T) {
+	assert := assert.T(t)
 
-	// Mock successful auth
-	nonce := ss.sc.nonce
-	ss.sc.nonce = ""
-	ss.sc.nonceOld = false
+	sc := &serverConn{dbms: &DbmsUnauth{}}
+	ss := &serverSession{sc: sc, thread: &Thread{}}
 
-	assert.T(t).This(nonce).Is("test-nonce")
-	assert.T(t).This(ss.sc.nonce).Is("")
-	assert.T(t).This(ss.sc.nonceOld).Is(false)
-}
+	// Commands that route through ss.sc.dbms should panic with "not authorized"
+	ss.SetBuf([]byte{0}) // empty string (varint size 0)
+	assert.This(func() { cmdAdmin(ss) }).Panics(notauth)
 
-func TestNonceExpirationLifecycle(t *testing.T) {
-	// Test complete nonce lifecycle: fresh → old → deleted
-	sc := &serverConn{id: 1, nonce: "test-nonce", nonceOld: false}
-	conns := map[uint32]*serverConn{1: sc}
+	ss.SetBuf([]byte{0}) // bool false
+	assert.This(func() { cmdCheck(ss) }).Panics(notauth)
 
-	// Initial state: fresh nonce
-	assert.T(t).This(sc.nonce).Is("test-nonce")
-	assert.T(t).This(sc.nonceOld).Is(false)
+	assert.This(func() { cmdConnections(ss) }).Panics(notauth)
 
-	// After 1 minute: nonce marked as old
-	expireNoncesLocked(conns)
-	assert.T(t).This(sc.nonce).Is("test-nonce")
-	assert.T(t).This(sc.nonceOld).Is(true)
+	ss.SetBuf([]byte{0}) // empty string (varint size 0)
+	assert.This(func() { cmdCursor(ss) }).Panics(notauth)
 
-	// After 2 minutes: nonce deleted
-	expireNoncesLocked(conns)
-	assert.T(t).This(sc.nonce).Is("")
-	assert.T(t).This(sc.nonceOld).Is(false)
+	assert.This(func() { cmdFinal(ss) }).Panics(notauth)
 
-	// After 3 minutes: no change (no nonce to process)
-	expireNoncesLocked(conns)
-	assert.T(t).This(sc.nonce).Is("")
-	assert.T(t).This(sc.nonceOld).Is(false)
+	assert.This(func() { cmdInfo(ss) }).Panics(notauth)
+
+	ss.SetBuf([]byte{0}) // empty string
+	assert.This(func() { cmdKill(ss) }).Panics(notauth)
+
+	// Encode a non-empty string for Log (varint 1 + "x" = 0x02 0x78)
+	ss.SetBuf([]byte{0x02, 'x'})
+	assert.This(func() { cmdLog(ss) }).Panics(notauth)
+
+	assert.This(func() { cmdSize(ss) }).Panics(notauth)
+
+	assert.This(func() { cmdTimestamp(ss) }).Panics(notauth)
+
+	ss.SetBuf([]byte{0}) // bool false
+	assert.This(func() { cmdTransaction(ss) }).Panics(notauth)
+
+	assert.This(func() { cmdTransactions(ss) }).Panics(notauth)
 }

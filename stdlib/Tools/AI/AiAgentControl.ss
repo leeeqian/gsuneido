@@ -1,44 +1,43 @@
 // Copyright (C) 2026 Suneido Software Corp. All rights reserved worldwide.
-// BuiltDate > 20260219
 Controller
 	{
-	Xmin: 800
-	Ymin: 800
+	Xmin:  800
+	Ymin:  800
 	Title: "AI Chat"
-	url: "https://openrouter.ai/api/v1"
+	url:   "https://openrouter.ai/api/v1"
 	keyUrl: "https://appserver.internal.axonsoft.com:8088/Wiki?" $
 		"OpenRouterApiKeyForAiAgentControl"
-	modelSettingKey: "AiAgentControl_model"
-	models: #(
-		"arcee-ai/trinity-large-thinking":
-			{ context: "256K", in: .22, out: .85 },
-		"deepseek/deepseek-v4-flash":
-			{ context: "1M", in: 0.10, out: 0.20 },
-		"deepseek/deepseek-v4-pro":
-			{ context: "1M", in: 0.44, out: 0.87 },
-		"google/gemini-3.1-flash-lite":
-			{ context: "1M", in: 0.25, out: 1.50 },
-		"minimax/minimax-m3":
-			{ context: "1M", in: 0.60, out: 2.40 },
-		"moonshotai/kimi-k2.7-code":
-			{ context: "256K", in: 0.75, out: 3.50 },
-		"nvidia/nemotron-3-super-120b-a12b":
-			{ context: "1M", in: 0.09, out: 0.45 },
-		"nvidia/nemotron-3-ultra-550b-a55b":
-			{ context: "1M", in: 0.50, out: 2.50 },
-		"qwen/qwen3.7-plus":
-			{ context: "1M", in: 0.32, out: 1.28 },
-		"qwen/qwen3.7-max":
-			{ context: "1M", in: 1.25, out: 3.75 },
-		"xiaomi/mimo-v2.5-pro":
-			{ context: "1M", in: 0.44, out: 0.87 },
+	modelSettingKey: #AiAgentControl_model
+	models: (
+		"deepseek/deepseek-v4.1-flash": [context: "1M", in: .15, out: .60],
+		"google/gemini-3.8-flash": [context: "1M", in: .75, out: 3.75],
+		"meituan/longcat-2.0": [context: "1M", in: .30, out: 1.20],
+		"minimax/minimax-m3": [context: "1M", in: .60, out: 2.40],
+		"moonshotai/kimi-k2.7-code": [context: "256K", in: .75, out: 3.50],
+		"nvidia/nemotron-3-ultra-550b-a55b": [context: "1M", in: .50, out: 2.20],
+		"openai/gpt-5.6-luna-pro": [context: "1M", in: .10, out: .60],
+		"openrouter/auto-beta": [context: "1M", in: .5, out: 2],
+		"qwen/qwen3.7-max": [context: "1M", in: 1.25, out: 3.75],
+		"qwen/qwen3.8-flash": [context: "1M", in: .15, out: .47],
+		"xiaomi/mimo-v2.5-pro": [context: "1M", in: .44, out: 0.87],
+		"z-ai/glm-5.3": [context: "1M", in: 1.40, out: 4.40],
+		"z-ai/glm-5.3-flash": [context: "1M", in: .08, out: .25]
 		)
-	defaultModel: "deepseek/deepseek-v4-pro"
+	defaultModel: "deepseek/deepseek-v4.1-flash"
 
-	CallClass(setText = '')
+	CallClass(setText = "")
 		{
-		DeleteOldFiles('.ai/', -7) /*= one week */
-		prompt = Query1("suneidoc", path: "/res", name: "AiPrompt").text
+		DeleteOldFiles(".ai/", -7) /*= one week */
+		aiPrompt = TableExists?(#suneidoc)
+			? Query1(#suneidoc, path: "/res", name: #AiPrompt)
+			: false
+		if aiPrompt is false
+			{
+			Alert("suneidoc table not found or suneidoc /res AiPrompt not found",
+				title: .Title, flags: MB.ICONERROR)
+			return
+			}
+		prompt = aiPrompt.text
 		model = UserSettings.Get(.modelSettingKey, .defaultModel)
 		if not .models.Member?(model)
 			model = .defaultModel
@@ -46,6 +45,7 @@ Controller
 		key = Suneido.GetInit(#AIAGENT_API_KEY, .getApiKey)
 		super.CallClass(key, model, prompt, setText)
 		}
+
 	getApiKey()
 		{
 		try
@@ -56,106 +56,105 @@ Controller
 		catch (e)
 			throw "error getting api key from wiki: " $ e
 		}
-	New(key, model, prompt, setText = '')
+
+	New(.key, model, prompt, setText = "")
 		{
 		.agent = AiAgent(.url, key, model, .output, prompt)
-		.model = .FindControl("model")
+		.model = .FindControl(#model)
 		.model.Set(model)
 		.vert = .Vert.VertSplit.Vert
-		.editor = .FindControl("Editor")
-		if setText isnt ''
+		.FindControl(#enterToSend).
+			Set(.enterToSend = UserSettings.Get(#AiAgentControl_EnterToSend, true))
+		.editor = .FindControl(#Editor)
+		if setText isnt ""
 			.editor.Set(setText)
-		.status = .FindControl("statusbar")
+		.status = .FindControl(#statusbar)
+		.startTime = Date()
+		.Defer(
+			{
+			.updateOpenRouterUsage()
+			.updateStatus()
+			})
 		Defer({ .editor.SetFocus() })
 		}
 
-	Commands: ((Users_Manual,	"F1"))
+	Commands: ((Users_Manual, F1))
 	Menu: ()
 	Controls()
 		{
-		["Vert",
-			["VertSplit",
-				[#Mshtml, .page, name: "webView", xstretch: 1, ystretch: 4],
+		[#Vert,
+			[#VertSplit,
+				[#Mshtml, .page, name: #webView, xstretch: 1, ystretch: 4],
 				[#Vert,
 					#Skip,
 					.normalButtons(),
 					#Skip,
-					#(ScintillaAddons, name: "Editor", wrap:, xstretch: 1),
-					]
-				]
-			#(Statusbar, name: "statusbar")
-			]
+					#(ScintillaAddons, name: Editor, wrap:, xstretch: 1)]],
+			#(Statusbar, name: statusbar)]
 		}
+
 	normalButtons(model = false)
 		{
 		if model is false
 			model = .defaultModel
 		return [#Horz,
 			#Fill,
-			#(Button, "Send", tip: "send a message to the AI"),
-			#Fill,
-			#(Button, "Stop", tip: "interrupt the AI"),
-			#Fill,
-			#(Button, "New", tip: "start a new conversation"),
-			#Fill,
-			#(Button, "Load", tip: "load a previous conversation"),
-			#Fill,
-			[#ChooseButton model, name: "model",
+			#(Button, Send, tip: "send a message to the AI"),
+			#Skip,
+			#(CheckBox, tip: "Enter key sends", tabover:, name: enterToSend),
+			#(Fill),
+			#(Button, Stop, tip: "interrupt the AI"),
+			#Fill, #Skip,
+			#(Button, New, tip: "start a new conversation"),
+			#Fill, #Skip,
+			#(Button, Load, tip: "load a previous conversation"),
+			#Fill, #Skip,
+			[#ChooseButton, model, name: #model,
 				list: .models.Members().Sort!()],
-			#Skip
-			#(LinkButton, "?", modelHelp)
-			#Fill
-			]
+			#Skip,
+			#(LinkButton, '?', modelHelp),
+			#Fill]
 		}
-	ApproveButtons: #(Horz,
+
+	ApproveButtons: (Horz,
 		Fill,
-		(EnhancedButton, "Allow", tip: "let the action go ahead"
-			mouseEffect:, buttonStyle:, pad: 20, weight: bold, textColor: 0x007700)
+		(EnhancedButton, Allow, tip: "let the action go ahead",
+			mouseEffect:, buttonStyle:, pad: 20, weight: bold, textColor: 0x00_7700),
 		Fill,
-		(EnhancedButton, "Deny", tip: "block the action"
-			mouseEffect:, buttonStyle:, pad: 20, weight: bold, textColor: 0x0000ff)
-		Fill
-		)
+		(EnhancedButton, Deny, tip: "block the action",
+			mouseEffect:, buttonStyle:, pad: 20, weight: bold, textColor: 0x00_00ff),
+		Fill)
 	On_modelHelp()
 		{
-		w0 = 40
-		w1 = 10
-		w2 = 6
-		w3 = 6
-		s = "Id".RightFill(w0) $ "Context".LeftFill(w1) $
-			"In".LeftFill(w2) $ "Out".LeftFill(w3) $ "\n"
-		s $= "-".Repeat(w0 + w1 + w2 + w3) $ "\n"
-		for m in .models.Members().Sort!()
-			{
-			x = .models[m]
-			s $= m.RightFill(w0) $
-				x.context.LeftFill(w1) $
-				x.in.Format('##.##').LeftFill(w2) $
-				x.out.Format('##.##').LeftFill(w3) $ "\n"
-			}
-		Alert(s, font: "@mono", title: "Models")
+		AiAgentModelHelp(.Window.Hwnd, .models)
 		}
+
 	sending: false
 	On_Send()
 		{
 		text = .userText()
 		if text is ""
 			return
-		.FindControl("Send").SetEnabled(false)
+		.startTime = Date()
+		.FindControl(#Send).SetEnabled(false)
 		.sending = true
 		.agent.Input(text)
 		}
+
 	userText()
 		{
 		text = .editor.Get().Trim()
 		if text isnt ""
-			.AppendMd(text $ "\n\n", "user")
+			.AppendMd(text $ "\n\n", #user)
 		.editor.Set("")
 		.editor.SetFocus()
 		return text
 		}
+
 	Enter_Pressed(pressed = false)
 		{
+		if not .enterToSend
+			return 0 // allow default (newline)
 		if KeyPressed?(VK.SHIFT, :pressed)
 			return 0 // allow default (newline)
 		.On_Send()
@@ -166,42 +165,96 @@ Controller
 		{
 		switch what
 			{
-		case "user":
+		case #user:
 			.AppendMd("**You:** " $ data, what)
-		case "think", "tool", "output":
+		case #think, #tool, #output:
 			.AppendMd(data, what)
 			.updateStatus()
-		case "complete":
+		case #complete:
 			.AppendMd(.endMarker)
-			if false isnt sendBtn = .FindControl("Send")
+			if false isnt sendBtn = .FindControl(#Send)
 				sendBtn.SetEnabled(true)
 			.sending = false
-			.updateStatus()
+			.Defer(// need defer to get outside sandbox for openrouter usage
+				{
+				.updateOpenRouterUsage()
+				.updateStatus()
+				})
 		default:
 			}
 		if approve isnt false
 			.Defer({ .approval(approve) })
 		}
+
 	endMarker: "[END_OF_MESSAGE]"
 
 	updateStatus()
 		{
 		if .model.Destroyed?()
 			return
-		if '' is model = .model.Get()
+		if "" is model = .model.Get()
 			return
 		contextLimit = .models[model].context
 		try // in case the exe doesn't have Usage or Cost yet
-			{
 			// using ending spaces to avoid overlapping with the resizing handler
-			.status.Set("\t\tContext: " $ .k(.agent.Usage()) $ " / " $ contextLimit $
-				"  |  Cost: " $ .agent.Cost().Format("##.##") $ '      ' )
-			}
+			.status.Set("\t\tContext: " $ .percentUsed(.agent.Usage(), contextLimit) $
+				"  |  Cost: " $ .agent.Cost().Format("##.##") $ "  |  Budget: " $
+				.creditsStr() $ "  |  Time: " $
+				.formatTime(Date().MinusSeconds(.startTime)) $ "      ")
 		}
-	k(n)
+
+	percentUsed(usage, contextLimit)
 		{
-		k = 1000
-		return (n / k).RoundToPrecision(2) $ "k"
+		percent = 100
+		usage = (usage / .contextTokens(contextLimit) * percent).Round(0)
+		return usage $ "% / " $ contextLimit
+		}
+
+	contextTokens(s)
+		{
+		n = Number(s.Tr(#KM))
+		return s.Suffix?('M') ? n * 1_000_000 : n * 1000 /*= M or K */
+		}
+
+	formatTime(secs)
+		{
+		oneMinute = 60
+		secs = secs.Round(0)
+		return (.fmt((secs / oneMinute).Floor(), #m) $
+			Opt(' ', .fmt((secs % oneMinute).Round(0), #s))).Trim()
+		}
+
+	fmt(number, unit)
+		{
+		return number is 0 ? "" : number $ unit
+		}
+
+	credits: false
+
+	creditsStr()
+		{
+		if false is c = .credits
+			return ""
+		if c.limit is false or c.limit is 0 or c.limit is ""
+			return ""
+		percent = 100
+		usage = (c.usage / c.limit * percent).Round(0)
+		return usage $ "% / $" $ c.limit
+		}
+
+	updateOpenRouterUsage()
+		{
+		.credits = false
+		try
+			{
+			url = "https://openrouter.ai/api/v1/auth/key"
+			header = Object(Authorization: "Bearer " $ .key)
+			result = HttpClient2(#GET, url, :header)
+			json = Json.Decode(result.content, handleNull: #skip)
+			.credits = [usage: json.data.usage_daily, limit: json.data.limit]
+			}
+		catch (e)
+			Print(e)
 		}
 
 	buttonsRowIndex: 1
@@ -227,14 +280,14 @@ Controller
 				.editor.Set(response.feedback)
 				switch response[0]
 					{
-				case "allow":
+				case #allow:
 					.On_Allow()
-				case "deny":
+				case #deny:
 					.On_Deny()
 				default:
 					}
 				}
-			.editLib = .editName = ''
+			.editLib = .editName = ""
 			}
 		}
 
@@ -242,9 +295,10 @@ Controller
 		{
 		model = .selectedModel
 		.replaceBottomRow(.normalButtons(model))
-		.model = .FindControl("model")
+		.model = .FindControl(#model)
 		.model.Set(model)
-		.FindControl("Send").SetEnabled(false)
+		.FindControl(#Send).SetEnabled(false)
+		.FindControl(#enterToSend).Set(.enterToSend)
 		}
 
 	On_Allow()
@@ -255,7 +309,7 @@ Controller
 		.pendingUpdate = false
 		update.Allow(.userText())
 		.restoreNormalButtons()
-		PubSub.PublishConsolidate('LibraryTreeChange', force:)
+		PubSub.PublishConsolidate(#LibraryTreeChange, force:)
 		}
 
 	On_Deny()
@@ -273,28 +327,28 @@ Controller
 		.agent.Interrupt()
 		.AppendMd("\n\n*Response interrupted by user.*\n\n")
 		.AppendMd(.endMarker)
-		.FindControl("Send").SetEnabled(true)
+		.FindControl(#Send).SetEnabled(true)
 		.sending = false
 		}
 
 	On_New()
 		{
 		.agent.ClearHistory()
-		.FindControl("webView").Set(.page)
+		.FindControl(#webView).Set(.page)
 		.status.Set("")
 		}
+
 	On_Load()
 		{
-		filename = OpenFileName(filter: "Log Files (*.md)|*.md|All Files (*.*)|*.*")
-		if filename isnt ""
+		if false isnt filename = AiAgentLoadControl()
 			{
-			.FindControl("webView").Set(.page)
+			.FindControl(#webView).Set(.page)
 			.agent.LoadConversation(filename)
 			}
 		}
 
-	agent: false
-	model: false
+	agent:         false
+	model:         false
 	selectedModel: false
 	NewValue(value, source)
 		{
@@ -303,14 +357,16 @@ Controller
 			.agent.SetModel(value)
 			.selectedModel = value
 			}
+		if source is ets = .FindControl(#enterToSend)
+			.enterToSend = ets.Get()
 		}
 
 	appendDeferred: false
-	editLib: ''
-	editName: ''
-	AppendMd(chunk, type = "output")
+	editLib:        ""
+	editName:       ""
+	AppendMd(chunk, type = #output)
 		{
-		.queue.Add(Object(chunk, type))
+		.queue.Add([chunk, type])
 		if .appendDeferred is true
 			return
 		.appendDeferred = true
@@ -330,23 +386,23 @@ Controller
 
 	appendMd(item)
 		{
-		if false is webview = .FindControl("webView")
+		if false is webview = .FindControl(#webView)
 			return
 		chunk = item[0]
 		type = item[1]
 		// base64 encode to avoid unicode issues
 		b64 = Base64.Encode(chunk)
 		html = `<i data-b64="` $ b64 $ `" data-type="` $ type $ `"></i>`
-		if type is 'tool' and
+		if type is #tool and
 			(chunk.Prefix?("**Edit Code** ") or chunk.Prefix?("**Create Code** "))
 			{
 			.editLib = chunk.AfterFirst('`').BeforeFirst('`')
-			.editName = chunk.AfterFirst('` `').BeforeFirst('`')
+			.editName = chunk.AfterFirst("` `").BeforeFirst('`')
 			}
-		webview.InsertAdjacentHTML("base64-sink", "beforeend", html)
+		webview.InsertAdjacentHTML("base64-sink", #beforeend, html)
 		}
 
-page: `<!DOCTYPE html>
+	page: `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
@@ -604,6 +660,7 @@ page: `<!DOCTYPE html>
 		{
 		if .selectedModel isnt false
 			UserSettings.Put(.modelSettingKey, .selectedModel)
+		UserSettings.Put(#AiAgentControl_EnterToSend, .enterToSend)
 		.agent.Close()
 		}
 	}

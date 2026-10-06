@@ -5,6 +5,7 @@ package query
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strconv"
@@ -87,7 +88,7 @@ func FuzzRandom(f *testing.F) {
 }
 
 func TestFuzzRandomDebug(t *testing.T) {
-	fuzzRandomRunner.Run(t, 204, 909)
+	fuzzRandomRunner.Run(t, 181, 161)
 }
 
 func TestFuzzRandom(t *testing.T) {
@@ -229,9 +230,7 @@ func composeFuzzProject(ft *FT, qs Query) Query {
 	deps := ft.ruleDeps
 	if ext, ok := qs.(*Extend); ok && len(ext.fwd) > 0 {
 		deps = make(map[string]string, len(ft.ruleDeps)+len(ext.fwd))
-		for k, v := range ft.ruleDeps {
-			deps[k] = v
-		}
+		maps.Copy(deps, ft.ruleDeps)
 		for i, fwd := range ext.fwd {
 			target := fwd[1:]
 			if dep, ok := ft.ruleDeps[target]; ok {
@@ -496,10 +495,9 @@ func randomSummarize(rnd *rand.Rand, srcCols []string, indexes [][]string) (by, 
 				add(op, on)
 			}
 		}
-		// select pairs so that no 'on' collides with a generated output name
+		// select pairs with distinct output column names
 		selected := make([]pair, 0, nops)
 		outputNames := make(map[string]struct{}, nops)
-		selectedOns := make(map[string]struct{}, nops)
 		rnd.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
 		for _, p := range pool {
 			if len(selected) >= nops {
@@ -509,17 +507,8 @@ func randomSummarize(rnd *rand.Rand, srcCols []string, indexes [][]string) (by, 
 			if _, dup := outputNames[out]; dup {
 				continue
 			}
-			if _, conflict := selectedOns[out]; conflict {
-				continue
-			}
-			if p.on != "" {
-				if _, conflict := outputNames[p.on]; conflict {
-					continue
-				}
-			}
 			selected = append(selected, p)
 			outputNames[out] = struct{}{}
-			selectedOns[p.on] = struct{}{}
 		}
 		nops = len(selected)
 		cols = cols[:nops]

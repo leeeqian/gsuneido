@@ -32,6 +32,8 @@ func NewTable(t QueryTran, name string) Query {
 		tbl = &Views{}
 	case "history":
 		tbl = &History{}
+	case "dbstats":
+		tbl = &StatsTable{}
 	default:
 		tbl = &Table{name: name}
 	}
@@ -54,6 +56,11 @@ type Table struct {
 	indexEncode bool
 	cursorMode  bool
 	req         Require
+}
+
+func (tbl *Table) Clone() *Table {
+	tbl2 := *tbl
+	return &tbl2
 }
 
 func (tbl *Table) isSingleton() bool {
@@ -92,13 +99,21 @@ func (tbl *Table) Name() string {
 }
 
 func (tbl *Table) SetTran(t QueryTran) {
+	if tbl.tran != t {
+		t.CheckPerm(tbl.name, PermRead)
+	}
 	tbl.tran = t
-	tbl.schema = t.GetSchema(tbl.name)
-	if tbl.schema == nil {
+	schema := t.GetSchema(tbl.name)
+	if schema == nil {
 		panic("nonexistent table: " + tbl.name)
 	}
+	// Update transactions can mutate info without changing its pointer.
 	tbl.info = t.GetInfo(tbl.name)
 	tbl.rowSiz.Set(tbl.getRowSize())
+	if schema == tbl.schema {
+		return
+	}
+	tbl.schema = schema
 
 	cols := make([]string, 0, len(tbl.schema.Columns)+len(tbl.schema.Derived))
 	for _, col := range tbl.schema.Columns {
@@ -113,6 +128,7 @@ func (tbl *Table) SetTran(t QueryTran) {
 
 	idxs := make([][]string, 0, len(tbl.schema.Indexes))
 	keys := make([][]string, 0, 1)
+	tbl.singleton = false
 	for i := range tbl.schema.Indexes {
 		ix := &tbl.schema.Indexes[i]
 		idxs = append(idxs, ix.Fields)
@@ -141,7 +157,7 @@ func (tbl *Table) getRowSize() int {
 	if tbl.info.Nrows == 0 {
 		return 0
 	}
-	return int(tbl.info.Size) / tbl.info.Nrows
+	return tbl.info.Size / tbl.info.Nrows
 }
 
 func (tbl *Table) Transform() Query {

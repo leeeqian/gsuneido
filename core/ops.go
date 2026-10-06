@@ -22,9 +22,9 @@ import (
 )
 
 var (
-	Zero     Value = SuInt(0)
-	One      Value = SuInt(1)
-	MinusOne Value = SuInt(-1)
+	Zero     Value = SuInt16(0)
+	One      Value = SuInt16(1)
+	MinusOne Value = SuInt16(-1)
 	MaxInt   Value = SuDnum{Dnum: dnum.FromInt(math.MaxInt32)}
 	Inf      Value = SuDnum{Dnum: dnum.PosInf}
 	NegInf   Value = SuDnum{Dnum: dnum.NegInf}
@@ -131,7 +131,7 @@ func OpLeftShift(x Value, y Value) Value {
 
 func OpRightShift(x Value, y Value) Value {
 	result := uint(ToInt(x)) >> ToInt(y)
-	return IntVal(int(result))
+	return IntVal(result)
 }
 
 func OpBitOr(x Value, y Value) Value {
@@ -353,8 +353,7 @@ func ToSuExcept(th *Thread, e any) *SuExcept {
 		var ss SuStr
 		switch e := e.(type) {
 		case error:
-			var perr runtime.Error
-			if errors.As(e, &perr) {
+			if _, ok := errors.AsType[runtime.Error](e); ok {
 				log.Println("ERROR:", e)
 				dbg.PrintStack()
 				printSuStack(th, e)

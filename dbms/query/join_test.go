@@ -7,16 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apmckinlay/gsuneido/core"
 	"github.com/apmckinlay/gsuneido/util/assert"
 )
 
 func TestJoin_nrows(t *testing.T) {
 	test := func(n1, p1, n2, p2, expected int) {
 		t.Helper()
-		j1n := Join{}
-		j1n.joinType = one_to_many
-		jn1 := Join{}
-		jn1.joinType = many_to_one
+		j1n := Join{joinType: one_to_many}
+		jn1 := Join{joinType: many_to_one}
 		assert.T(t).Msg(n1, "/", p1, one_to_many, n2, "/", p2, "=>", expected).
 			This(j1n.nrows(n1, p1, n2, p2)).Is(expected)
 		assert.T(t).Msg(n1, "/", p1, many_to_one, n2, "/", p2, "=>", expected).
@@ -55,7 +54,7 @@ func TestJoin_SelectFixedBug(t *testing.T) {
 		where ck is "" `
 	joinRev = impossible
 	defer func() { joinRev = 0 }()
-	tran := sizeTran{db.NewReadTran()}
+	tran := sizeTran{db.NewReadTran(core.AllPerms)}
 	q := ParseQuery(query, tran, nil)
 	q, _, _ = Setup(q, ReadMode, tran)
 	// TODO: tempindex(bk) may not be needed once Where is migrated to v2
@@ -85,7 +84,7 @@ func TestJoin_EmptyTempIndexBug(t *testing.T) {
 			(ivc where ik is 4 and ck is ""))`
 	joinRev = impossible
 	defer func() { joinRev = 0 }()
-	tran := sizeTran{db.NewReadTran()}
+	tran := sizeTran{db.NewReadTran(core.AllPerms)}
 	q := ParseQuery(query, tran, nil)
 	idx := []string{"ck", "ik"}
 	q = setupIndex(q, ReadMode, tran, idx)

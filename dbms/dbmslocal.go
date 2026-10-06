@@ -11,7 +11,6 @@ import (
 
 	"slices"
 
-	"github.com/apmckinlay/gsuneido/compile"
 	. "github.com/apmckinlay/gsuneido/core"
 	"github.com/apmckinlay/gsuneido/core/trace"
 	"github.com/apmckinlay/gsuneido/db19"
@@ -43,29 +42,19 @@ func NewDbmsLocal(db *db19.Database) *DbmsLocal {
 
 var _ IDbms = (*DbmsLocal)(nil)
 
-func (dbms *DbmsLocal) Admin(admin string, sv *Sviews) {
+func (dbms *DbmsLocal) Admin(admin string, sv *Sviews, perms *Perms) {
 	trace.Dbms.Println("Admin", admin)
-	qry.DoAdmin(dbms.db, admin, sv)
+	qry.DoAdmin(dbms.db, admin, sv, perms)
 }
 
-func (dbms *DbmsLocal) Auth(th *Thread, s string) bool {
-	if DbmsAuth {
-		panic("already authorized")
-	}
-	if !auth(th, s) {
-		return false
-	}
-	DbmsAuth = true
-	th.SetDbms(dbms) // not strictly necessary, removes unauth wrap
+// AdminTest executes an admin command with all permissions.
+// It is used by tests that aren't exercising permissions.
+func (dbms *DbmsLocal) AdminTest(admin string) {
+	dbms.Admin(admin, nil, AllPerms)
+}
+
+func (dbms *DbmsLocal) Auth(th *Thread, data Value) bool {
 	return true
-}
-
-func auth(th *Thread, s string) bool {
-	if AuthUser(th, s, th.Nonce) {
-		th.Nonce = ""
-		return true
-	}
-	return AuthToken(s)
 }
 
 func (dbms *DbmsLocal) Check(full bool) string {
@@ -79,8 +68,11 @@ func (*DbmsLocal) Connections() Value {
 	return connections()
 }
 
-func (dbms *DbmsLocal) Cursor(query string, sv *Sviews) ICursor {
-	tran := dbms.db.NewReadTran()
+// Cursor builds a cursor using perms for the transaction it is planned with.
+// Passing the connection's perms also protects against accidentally using
+// the build transaction instead of the transaction passed to Get.
+func (dbms *DbmsLocal) Cursor(query string, sv *Sviews, perms *Perms) ICursor {
+	tran := dbms.db.NewReadTran(perms)
 	q, fixcost, varcost := buildQuery(query, tran, sv, qry.CursorMode)
 	trace.Query.Println("cursor", fixcost+varcost, "-", query)
 	return cursorLocal{queryLocal{
@@ -129,10 +121,14 @@ func (dbms *DbmsLocal) Dump(table, to, publicKey string) string {
 	return ""
 }
 
+func execName(v Value) string {
+	return ToStr(ToContainer(v).ListGet(0))
+}
+
 func (*DbmsLocal) Exec(th *Thread, v Value) Value {
 	defer UseMainSuneido(th)()
 	trace.Dbms.Println("Exec", v)
-	fname := ToStr(ToContainer(v).ListGet(0))
+	fname := execName(v)
 	if before, after, ok := strings.Cut(fname, "."); ok {
 		ob := Global.GetName(th, before)
 		m := after
@@ -149,15 +145,15 @@ func (dbms *DbmsLocal) Final() int {
 // Get handles QueryFirst, QueryLast, Query1, QueryEmpty?
 func (dbms *DbmsLocal) Get(
 	th *Thread, query Value, dir Dir) (Row, *Header, string) {
-	tran := dbms.db.NewReadTran()
+	tran := dbms.db.NewReadTran(th.Perms())
 	defer tran.Complete()
 	return get(th, tran, query, dir)
 }
 
 func (dbms *DbmsLocal) Info() Value {
 	ob := &SuObject{}
-	ob.Set(SuStr("currentSize"), Int64Val(int64(dbms.db.Size())))
-	ob.Set(SuStr("timeoutMin"), IntVal(int(options.TimeoutMinutes)))
+	ob.Set(SuStr("currentSize"), IntVal(dbms.db.Size()))
+	ob.Set(SuStr("timeoutMin"), IntVal(options.TimeoutMinutes))
 	return ob
 }
 
@@ -193,7 +189,7 @@ func (dbms *DbmsLocal) LibGet(name string) []string {
 	}()
 
 	defs := make([]string, 0, 4)
-	rt := dbms.db.NewReadTran()
+	rt := dbms.db.NewReadTran(AllPerms)
 	libs := dbms.libraries.Load()
 	for _, lib := range libs {
 		defs = dbms.LibGet1(rt, lib, name, defs)
@@ -227,7 +223,7 @@ func (dbms *DbmsLocal) LibGet1(rt *db19.ReadTran, lib, name string, defs []strin
 	for _, tag := range options.LibraryTags {
 		nametag := name + tag
 		rb.Add(Pack(SuStr(nametag)))
-		rb.Add(Pack(SuInt(-1)))
+		rb.Add(Pack(SuInt16(-1)))
 		key := rb.String()
 		off := ix.Lookup(key)
 		if off != 0 {
@@ -256,17 +252,6 @@ func (*DbmsLocal) Log(s string) {
 	log.Println(s)
 }
 
-func (*DbmsLocal) Nonce(th *Thread) string {
-	th.Nonce = Nonce()
-	return th.Nonce
-}
-
-func (*DbmsLocal) Run(th *Thread, s string) Value {
-	defer UseMainSuneido(th)()
-	trace.Dbms.Println("Run", s)
-	return compile.EvalString(th, s)
-}
-
 func (dbms *DbmsLocal) Schema(table string) string {
 	return dbms.db.Schema(table)
 }
@@ -286,16 +271,13 @@ func (*DbmsLocal) Timestamp() SuDate {
 	return db19.Timestamp()
 }
 
-func (*DbmsLocal) Token() string {
-	return Token()
-}
-
-func (dbms *DbmsLocal) Transaction(update bool) ITran {
+func (dbms *DbmsLocal) Transaction(update bool, perms *Perms) ITran {
 	if update {
-		t := dbms.db.NewUpdateTran()
+		t := dbms.db.NewUpdateTran(perms)
 		return &UpdateTranLocal{UpdateTran: t}
 	}
-	return &ReadTranLocal{ReadTran: dbms.db.NewReadTran()}
+	t := dbms.db.NewReadTran(perms)
+	return &ReadTranLocal{ReadTran: t}
 }
 
 // Transactions only returns the update transactions
@@ -332,7 +314,7 @@ func (dbms *DbmsLocal) Use(lib string) bool {
 }
 
 func (dbms *DbmsLocal) checkLibrary(lib string) {
-	rt := dbms.db.NewReadTran()
+	rt := dbms.db.NewReadTran(AllPerms)
 	if rt.GetIndex(lib, libKey) == nil || rt.ColToFld(lib, "text") == -1 {
 		panic("Use: invalid library: " + lib)
 	}
@@ -348,12 +330,8 @@ func (dbms *DbmsLocal) updateLibraries(fn func(libs []string) []string) bool {
 	return slices.Equal(oldlibs, dbms.libraries.Swap(newlibs))
 }
 
-func (dbms *DbmsLocal) Unwrap() IDbms {
-	return dbms
-}
-
-func (dbms *DbmsLocal) FormatQuery(query string) string {
-	t := dbms.db.NewReadTran()
+func (dbms *DbmsLocal) FormatQuery(query string, perms *Perms) string {
+	t := dbms.db.NewReadTran(perms)
 	defer t.Complete()
 	return qry.Format(t, query)
 }

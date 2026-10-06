@@ -44,9 +44,6 @@ func numFromString(s string) Value {
 	return NumFromString(s)
 }
 
-var minNarrow = dnum.FromInt(MinSuInt)
-var maxNarrow = dnum.FromInt(MaxSuInt)
-
 var _ = exportMethods(&NumMethods, "num")
 
 var _ = method(num_Binary, "() :string")
@@ -66,9 +63,8 @@ var _ = method(num_Int, "() :number")
 
 func num_Int(this Value) Value {
 	dn := ToDnum(this).Trunc()
-	if dnum.Compare(dn, minNarrow) >= 0 && dnum.Compare(dn, maxNarrow) <= 0 {
-		n, _ := dn.ToInt()
-		return SuInt(n)
+	if n, ok := dn.ToInt(); ok {
+		return IntVal(n)
 	}
 	return SuDnum{Dnum: dn}
 }
@@ -101,25 +97,31 @@ func num_Hex(this Value) Value {
 var _ = method(num_Round, "(number) :number")
 
 func num_Round(this, arg Value) Value {
-	x := ToDnum(this)
-	r := ToInt(arg)
-	return SuDnum{Dnum: x.Round(r, dnum.HalfUp)}
+	return round(this, arg, dnum.HalfUp)
 }
 
 var _ = method(num_RoundUp, "(number) :number")
 
 func num_RoundUp(this, arg Value) Value {
-	x := ToDnum(this)
-	r := ToInt(arg)
-	return SuDnum{Dnum: x.Round(r, dnum.Up)}
+	return round(this, arg, dnum.Up)
 }
 
 var _ = method(num_RoundDown, "(number) :number")
 
 func num_RoundDown(this, arg Value) Value {
-	x := ToDnum(this)
+	return round(this, arg, dnum.Down)
+}
+
+func round(this, arg Value, mode dnum.RoundingMode) Value {
 	r := ToInt(arg)
-	return SuDnum{Dnum: x.Round(r, dnum.Down)}
+	dn := ToDnum(this).Round(r, mode)
+	if r == 0 {
+		if n, ok := dn.ToInt(); ok {
+			return IntVal(n)
+		}
+		panic("number.Round(0) should return an integer")
+	}
+	return SuDnum{Dnum: dn}
 }
 
 // float methods
@@ -229,10 +231,7 @@ func toFloat(v Value) float64 {
 func fromFloat(f float64) Value {
 	n := int64(f)
 	if f == float64(n) {
-		if MinSuInt <= n && n <= MaxSuInt {
-			return SuInt(int(n))
-		}
-		return SuDnum{Dnum: dnum.FromInt(n)}
+		return IntVal(n)
 	}
 	return SuDnum{Dnum: dnum.FromFloat(f)}
 }

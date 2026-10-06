@@ -25,6 +25,7 @@ This tool is the preferred way to edit existing code.
 - For deletions with replace_lines: Set 'code' to an empty string
 - Always call suneido_read_code before this to ensure line numbers are current
 - Do NOT include line numbers in the replacement code, just the code itself
+- Preserve the exact indentation (leading tabs/spaces) of the lines being edited
 `,
 	params: []stringParam{
 		{name: "library", description: "Name of the library (e.g. 'stdlib')", required: true, kind: paramString},
@@ -32,7 +33,7 @@ This tool is the preferred way to edit existing code.
 		{name: "mode", description: "Operation mode: 'insert_before', 'insert_after', or 'replace_lines'", required: true, kind: paramString},
 		{name: "line", description: "Line number (1-based)", required: true, kind: paramNumber},
 		{name: "count", description: "Number of lines to replace (only for replace_lines mode)", required: false, kind: paramNumber},
-		{name: "code", description: "Replacement code", required: true, kind: paramString},
+		{name: "code", description: "Replacement code, preserving the original indentation (leading tabs/spaces)", required: true, kind: paramString},
 	},
 	summarize: func(args map[string]any) string {
 		line := argInt(args, "line", 0)
@@ -98,7 +99,7 @@ func editCodeTool(ctx context.Context, library, name, mode string, line, count i
 		return editCodeOutput{}, fmt.Errorf("invalid name: %s", name)
 	}
 
-	th := core.NewThread(core.MainThread)
+	th := toolThread(ctx)
 	defer th.Close()
 
 	if err := validateLibrary(th, library); err != nil {
@@ -106,7 +107,7 @@ func editCodeTool(ctx context.Context, library, name, mode string, line, count i
 	}
 
 	query := fmt.Sprintf("%s where group = -1 and name = %q", library, name)
-	rtran := th.Dbms().Transaction(false)
+	rtran := th.Dbms().Transaction(false, th.Perms())
 	rq := rtran.Query(query, nil)
 	hdr := rq.Header()
 	row, _ := rq.Get(th, core.Next)
@@ -184,7 +185,7 @@ func editCodeTool(ctx context.Context, library, name, mode string, line, count i
 	vals["text"] = core.PackValue(core.SuStr(newText))
 	vals["lib_modified"] = core.PackValue(core.Now())
 
-	utran := th.Dbms().Transaction(true)
+	utran := th.Dbms().Transaction(true, th.Perms())
 	newRec := buildRecord(hdr, vals)
 	utran.Update(th, library, off, newRec)
 	if conflict := utran.Complete(); conflict != "" {
@@ -263,10 +264,15 @@ func applyLineEdit(oldText string, mode string, line, count int, insert string) 
 	}
 
 	insert = normalizeCRLF(insert)
+	insert = addMissingIndent(insert, indentContext(oldText, mode, line))
 
 	var sb strings.Builder
-	sb.Grow(len(oldText) - (endOff - startOff) + len(insert))
+	sb.Grow(len(oldText) - (endOff - startOff) + len(insert) + 2)
 	sb.WriteString(oldText[:startOff])
+	if insert != "" && startOff > 0 && oldText[startOff-1] != '\n' &&
+		!strings.HasPrefix(insert, "\r\n") {
+		sb.WriteString("\r\n")
+	}
 	sb.WriteString(insert)
 	if endOff < len(oldText) {
 		if insert != "" && !strings.HasSuffix(insert, "\n") && !strings.HasSuffix(insert, "\r\n") {
@@ -323,6 +329,83 @@ func findFromTo(from int, to int, oldText string) (int, int, error) {
 	return startOff, endOff, nil
 }
 
+// indentContext returns the indentation to apply to inserted code. It matches
+// the first non-blank line at the insertion point (the following line for
+// insert_after, the target line otherwise), falling back to the closest
+// preceding non-blank line when no non-blank line follows.
+func indentContext(text, mode string, line int) string {
+	start := line
+	if mode == "insert_after" {
+		start = line + 1
+	}
+	if indent, ok := lineIndentAfter(text, start); ok {
+		return indent
+	}
+	indent, _ := lineIndentBefore(text, start-1)
+	return indent
+}
+
+// lineIndentAfter returns the leading whitespace of the first non-blank line
+// at or after the given 1-based line number, and whether such a line exists.
+func lineIndentAfter(text string, line int) (string, bool) {
+	if line < 1 {
+		return "", false
+	}
+	lines := strings.Split(text, "\n")
+	for l := line; l <= len(lines); l++ {
+		if indent, ok := indentOf(lines[l-1]); ok {
+			return indent, true
+		}
+	}
+	return "", false
+}
+
+// lineIndentBefore returns the leading whitespace of the first non-blank line
+// at or before the given 1-based line number.
+func lineIndentBefore(text string, line int) (string, bool) {
+	lines := strings.Split(text, "\n")
+	if line > len(lines) {
+		line = len(lines)
+	}
+	for l := line; l >= 1; l-- {
+		if indent, ok := indentOf(lines[l-1]); ok {
+			return indent, true
+		}
+	}
+	return "", false
+}
+
+// indentOf returns the leading whitespace of line if it is not blank.
+func indentOf(line string) (string, bool) {
+	line = strings.TrimRight(line, "\r")
+	if strings.TrimSpace(line) == "" {
+		return "", false
+	}
+	end := 0
+	for end < len(line) && (line[end] == ' ' || line[end] == '\t') {
+		end++
+	}
+	return line[:end], true
+}
+
+// addMissingIndent prepends indent to insert when the first line of insert has
+// no leading whitespace, so it matches the indentation of the surrounding code.
+func addMissingIndent(insert, indent string) string {
+	if insert == "" || indent == "" {
+		return insert
+	}
+	before, _, ok := strings.Cut(insert, "\n")
+	first := insert
+	if ok {
+		first = before
+	}
+	first = strings.TrimSuffix(first, "\r")
+	if first != "" && first[0] != ' ' && first[0] != '\t' {
+		return indent + insert
+	}
+	return insert
+}
+
 func normalizeCRLF(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -361,19 +444,13 @@ func extractContext(text string, start, end int) string {
 	}
 
 	// Calculate context range (4 lines before and after)
-	contextStart := start - 4
-	if contextStart < 1 {
-		contextStart = 1
-	}
-	contextEnd := end + 4
-	if contextEnd > len(lines) {
-		contextEnd = len(lines)
-	}
+	contextStart := max(start-4, 1)
+	contextEnd := min(end+4, len(lines))
 
 	// Build result with line numbers
 	var sb strings.Builder
 	for i := contextStart; i <= contextEnd; i++ {
-		fmt.Fprintf(&sb, "%4d: %s\n", i, lines[i-1])
+		fmt.Fprintf(&sb, "[%4d]%s\n", i, lines[i-1])
 	}
 	return sb.String()
 }

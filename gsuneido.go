@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"runtime/metrics"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ import (
 	"github.com/apmckinlay/gsuneido/util/system"
 	// sync "github.com/sasha-s/go-deadlock"
 )
+
+// only allow building on 64 bit systems
+type _ [strconv.IntSize - 64]byte
 
 var builtDate = "Jan 23 2023 12:34" // set by: go build -ldflags "-X main.builtDate=..."
 var mode = ""                       // set by: go build -ldflags "-X main.mode=gui"
@@ -103,6 +107,7 @@ func main() {
 		if mode == "gui" {
 			Fatal("Please use gsport for server mode")
 		}
+		mainThread.SetPerms(AllPerms)
 		runServer()
 	case "dump":
 		t := time.Now()
@@ -354,8 +359,12 @@ func openDbms() {
 	db19.StartTimestamps()
 	db19.StartConcur(db, persistInterval())
 	dbmsLocal = dbms.NewDbmsLocal(db)
-	DbmsAuth = options.Action == "server" || mode != "gui" || !db.HaveUsers()
-	GetDbms = getDbms
+	if options.Action == "server" {
+		GetDbms = func() IDbms { return dbmsLocal }
+	} else {
+		dbms.StandaloneDbms.Store(dbms.Unauth(dbmsLocal))
+		GetDbms = func() IDbms { return dbms.StandaloneDbms.Load() }
+	}
 	exit.Add("close database", func() {
 		exit.Progress("database closing")
 		db.CloseKeepMapped() // keep mapped to avoid errors during shutdown
@@ -404,13 +413,6 @@ func persistInterval() time.Duration {
 		d = 10 * time.Second
 	}
 	return d
-}
-
-func getDbms() IDbms {
-	if DbmsAuth {
-		return dbmsLocal
-	}
-	return dbms.Unauth(dbmsLocal)
 }
 
 // func checkState() {
@@ -492,14 +494,16 @@ func eval(src string) {
 	fn := v.(*SuFunc)
 	// fmt.Println(DisasmMixed(fn, src))
 
+	perms := mainThread.Perms()
 	mainThread.Reset()
+	mainThread.SetPerms(perms)
 	mainThread.SetSviews(&sviews)
 	result := mainThread.Call(fn)
 	if result != nil {
 		fmt.Println(WithType(result)) // NOTE: doesn't use ToString
 	} else if len(mainThread.ReturnMulti) > 0 {
-		for i := len(mainThread.ReturnMulti) - 1; i >= 0; i-- {
-			fmt.Println(WithType(mainThread.ReturnMulti[i]))
+		for _, v := range slices.Backward(mainThread.ReturnMulti) {
+			fmt.Println(WithType(v))
 		}
 	}
 }

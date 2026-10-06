@@ -180,7 +180,7 @@ func NormalizeDate(yr int, mon int, day int, hr int, min int, sec int, ms int) S
 func (d SuDate) AddMs(ms int) SuDate {
 	assert.That(0 < ms && ms < 100)
 	orig := d
-	if int(d.Millisecond())+ms < 1000 {
+	if d.Millisecond()+ms < 1000 {
 		d.time += uint32(ms) // fast path
 		return d
 	}
@@ -199,45 +199,45 @@ func (d SuDate) WeekDay() int {
 
 // MinusDays returns the difference between two Dates in days
 func (d SuDate) MinusDays(other SuDate) int {
-	return (int)(d.jday() - other.jday())
+	return d.jday() - other.jday()
 }
 
-func (d SuDate) jday() int64 {
+func (d SuDate) jday() int {
 	return julianDayNumber(d.Year(), d.Month(), d.Day())
 }
 
 // julianDayNumber returns the time's Julian Day Number
 // relative to the epoch 12:00 January 1, 4713 BC, Monday.
 // NOTE: based on Go time package code
-func julianDayNumber(year, month, day int) int64 {
-	a := int64(14-month) / 12
-	y := int64(year) + 4800 - a
-	m := int64(month) + 12*a - 3
-	return int64(day) + (153*m+2)/5 + 365*y + y/4 - y/100 + y/400 - 32045
+func julianDayNumber(year, month, day int) int {
+	a := (14 - month) / 12
+	y := year + 4800 - a
+	m := month + 12*a - 3
+	return day + (153*m+2)/5 + 365*y + y/4 - y/100 + y/400 - 32045
 }
 
 // MinusMs returns the difference between two Dates in milliseconds
 //
 // WARNING: doing this around daylight savings changes may be problematic
-func (d SuDate) MinusMs(other SuDate) int64 {
+func (d SuDate) MinusMs(other SuDate) int {
 	if d.date == other.date {
 		return d.timeAsMs() - other.timeAsMs()
 	}
 	return d.UnixMilli() - other.UnixMilli()
 }
 
-func (d SuDate) timeAsMs() int64 {
-	return int64(d.Millisecond()) +
-		int64(1000)*int64(d.Second()+60*(d.Minute()+60*d.Hour()))
+func (d SuDate) timeAsMs() int {
+	return d.Millisecond() +
+		int(1000)*(d.Second()+60*(d.Minute()+60*d.Hour()))
 }
 
 // UnixMilli returns the time in milliseconds since 1 Jan 1970
-func (d SuDate) UnixMilli() int64 {
-	return d.ToGoTime().UnixMilli()
+func (d SuDate) UnixMilli() int {
+	return int(d.ToGoTime().UnixMilli())
 }
 
-func SuDateFromUnixMilli(t int64) SuDate {
-	return FromGoTime(time.UnixMilli(t))
+func SuDateFromUnixMilli(t int) SuDate {
+	return FromGoTime(time.UnixMilli(int64(t)))
 }
 
 func (d SuDate) ToGoTime() time.Time {
@@ -619,12 +619,12 @@ func ParseDate(s string, order string) SuDate {
 func nextWord(s string, si int) string {
 	dst := []byte{}
 	for ; si < len(s) && ascii.IsLetter(s[si]); si++ {
-		dst = append(dst, byte(ascii.ToLower(s[si])))
+		dst = append(dst, ascii.ToLower(s[si]))
 	}
 	if len(dst) == 0 {
 		return ""
 	}
-	dst[0] = byte(ascii.ToUpper(dst[0]))
+	dst[0] = ascii.ToUpper(dst[0])
 	return string(dst)
 }
 
@@ -644,7 +644,7 @@ func getSyspat(order string, datePatterns []string) []byte {
 	for oi := 0; oi < len(order) && i < 3; oi++ {
 		oc = order[oi]
 		if oc != prev && (oc == 'y' || oc == 'M' || oc == 'd') {
-			syspat[i] = byte(ascii.ToLower(oc))
+			syspat[i] = ascii.ToLower(oc)
 			i++
 		}
 		prev = oc
@@ -671,7 +671,7 @@ func ampmAhead(s string, i int) bool {
 		i++
 		s0 = get(s, i)
 	}
-	s0 = byte(ascii.ToLower(s0))
+	s0 = ascii.ToLower(s0)
 	return (s0 == 'a' || s0 == 'p') &&
 		ascii.ToLower(get(s, i+1)) == 'm'
 }
@@ -795,7 +795,7 @@ func (SuDate) PackSize(*uint64) int {
 	return 9
 }
 
-func (SuDate) PackSize2(*uint64, packStack) int {
+func (SuDate) PackSize2(*uint64, PackStack) int {
 	return 9
 }
 

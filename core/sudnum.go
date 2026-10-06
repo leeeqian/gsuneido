@@ -41,10 +41,10 @@ func (dn SuDnum) String() string {
 	return dn.Dnum.String()
 }
 
+// Hash must give consistent results for equal SuInt16, SuInt64, and SuDnum
 func (dn SuDnum) Hash() uint64 {
-	if n, ok := dn.ToInt64(); ok && MinSuInt <= n && n <= MaxSuInt {
-		// must give the same hash as SuInt
-		return uint64(n) * phi64
+	if n, ok := dn.IfInt(); ok {
+		return hashInt(n)
 	}
 	return dn.Dnum.Hash()
 }
@@ -57,7 +57,9 @@ func (dn SuDnum) Equal(other any) bool {
 	if d2, ok := other.(SuDnum); ok {
 		return dnum.Equal(dn.Dnum, d2.Dnum)
 	} else if i, ok := SuIntToInt(other); ok {
-		return dnum.Equal(dn.Dnum, dnum.FromInt(int64(i)))
+		if n, ok := dn.IfInt(); ok {
+			return n == i
+		}
 	}
 	return false
 }
@@ -149,7 +151,7 @@ func (dn SuDnum) PackSize(*uint64) int {
 	return 10
 }
 
-func (dn SuDnum) PackSize2(*uint64, packStack) int {
+func (dn SuDnum) PackSize2(*uint64, PackStack) int {
 	return dn.PackSize(nil)
 }
 

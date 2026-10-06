@@ -57,8 +57,6 @@ type thread1 struct {
 	// TrCache is per thread so no locking is required
 	trCache *cache.Cache[string, tr.Set]
 
-	Nonce string
-
 	profile profile
 
 	// rules is a stack of the currently running rules, used by SuRecord
@@ -94,8 +92,14 @@ type thread1 struct {
 
 	Rand *rand.Rand
 
-	// ReturnMulti is used by op.ReturnMulti and op.PushReturn
+	// ReturnMulti is used to return multiple values
 	ReturnMulti []Value
+
+	// newPerms is used to construct permissions during Auth.
+	newPerms *Perms
+
+	// permissions for this thread
+	perms *Perms
 }
 
 // thread2 is the non-reset-able part of Thread
@@ -123,7 +127,7 @@ var threadNum atomic.Int32
 
 // NewThread creates a new thread.
 // It is primarily used for user initiated threads.
-// Internal threads can just use a zero Thread.
+// If parent is nil the new thread will not have any permissions.
 func NewThread(parent *Thread) *Thread {
 	th := setup(&Thread{})
 	if parent != nil {
@@ -132,6 +136,7 @@ func NewThread(parent *Thread) *Thread {
 			th.Suneido.Store(suneido)
 		}
 		th.sv = parent.sv
+		th.perms = parent.perms
 	}
 	return th
 }
@@ -161,6 +166,13 @@ func (th *Thread) Reset() {
 	th.thread1 = thread1{} // zero it
 	th.Name = str.BeforeFirst(th.Name, " ")
 	th.Suneido.Store(nil)
+	th.ClearReturnMulti()
+}
+
+// ClearReturnMulti clears and resets ReturnMulti to release references.
+func (th *Thread) ClearReturnMulti() {
+	clear(th.ReturnMulti)
+	th.ReturnMulti = th.ReturnMulti[:0]
 }
 
 func (th *Thread) Session() string {
@@ -173,6 +185,23 @@ func (th *Thread) SetSession(s string) {
 
 func (th *Thread) SetSviews(sv *Sviews) {
 	th.sv = sv
+}
+
+func (th *Thread) SetPerms(p *Perms) {
+	th.perms = p
+}
+
+func (th *Thread) Perms() *Perms {
+	return th.perms
+}
+
+func (th *Thread) SetNewPerms(p *Perms) {
+	th.newPerms = p
+}
+
+// NewPerms is only valid during Auth while building permissions.
+func (th *Thread) NewPerms() *Perms {
+	return th.newPerms
 }
 
 // Push pushes a value onto the value stack.
@@ -323,15 +352,16 @@ func (th *Thread) TraceCaller() {
 	}
 }
 
-// SetDbms is used to set up the main thread initially
-func (th *Thread) SetDbms(dbms IDbms) {
+// SetDbms is used to set up the main thread initially.
+// It returns the previous value (if any) to allow save & restore.
+func (th *Thread) SetDbms(dbms IDbms) IDbms {
+	prev := th.dbms
 	th.dbms = dbms
+	return prev
 }
 
 // GetDbms requires dependency injection
 var GetDbms = func() IDbms { panic("no dbms") }
-
-var DbmsAuth = false
 
 func (th *Thread) Dbms() IDbms {
 	if th.dbms == nil {
@@ -341,7 +371,7 @@ func (th *Thread) Dbms() IDbms {
 			th.dbms.SessionId(th, s)
 		}
 	}
-	return th.dbms.Unwrap()
+	return th.dbms
 }
 
 // Close closes the thread's dbms connection (if it has one)

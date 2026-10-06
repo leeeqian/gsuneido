@@ -17,13 +17,13 @@ func TestSuRecord(t *testing.T) {
 	r := new(SuRecord)
 	assert.T(t).This(r.Type()).Is(types.Record)
 	assert.T(t).This(r.String()).Is("[]")
-	r.Set(SuStr("a"), SuInt(123))
+	r.Set(SuStr1("a"), SuInt16(123))
 	assert.T(t).This(r.String()).Is("[a: 123]")
 }
 
 func TestSuRecord_ReadonlyUnpack(t *testing.T) {
 	b := RecordBuilder{}
-	b.Add(SuInt(123))
+	b.Add(SuInt16(123))
 	b.Add(SuStr("foobar"))
 	rec := b.Build()
 	dbrec := DbRec{Record: rec}
@@ -34,7 +34,7 @@ func TestSuRecord_ReadonlyUnpack(t *testing.T) {
 
 	assert.T(t).This(surec.Get(nil, SuStr("str"))).Is(SuStr("foobar"))
 	surec.SetReadOnly()
-	assert.T(t).This(surec.Get(nil, SuStr("num"))).Is(SuInt(123))
+	assert.T(t).This(surec.Get(nil, SuStr("num"))).Is(SuInt16(123))
 }
 
 func TestSuRecord_Concurrency(t *testing.T) {
@@ -73,11 +73,11 @@ func TestSuRecord_Concurrency(t *testing.T) {
 			case 0:
 				return this.Get(th, randCol())
 			case 1:
-				this.Put(th, randCol(), SuStr(randCol()))
+				this.Put(th, randCol(), randCol())
 			}
 			return nil
 		},
-		BuiltinParams: BuiltinParams{ParamSpec: ParamSpec0}}
+		ParamSpec: ParamSpec0}
 
 	var wg sync.WaitGroup
 	run := func() {
@@ -87,18 +87,18 @@ func TestSuRecord_Concurrency(t *testing.T) {
 			case 0:
 				getrec().Get(th, randCol())
 			case 1:
-				getrec().Put(th, randCol(), SuStr(randCol()))
+				getrec().Put(th, randCol(), randCol())
 			case 2:
 				r := NewSuRecord()
 				r.SetConcurrent()
-				r.AttachRule(SuStr("c"), rule)
-				r.AttachRule(SuStr("d"), rule)
+				r.AttachRule(SuStr1("c"), rule)
+				r.AttachRule(SuStr1("d"), rule)
 				setrec(r)
 			case 3:
 				r := SuRecordFromRow(row, SimpleHeader(cols), "", nil)
 				r.SetConcurrent()
-				r.AttachRule(SuStr("c"), rule)
-				r.AttachRule(SuStr("d"), rule)
+				r.AttachRule(SuStr1("c"), rule)
+				r.AttachRule(SuStr1("d"), rule)
 				setrec(r)
 			case 4:
 				r := getrec().Copy().(*SuRecord)
@@ -154,16 +154,16 @@ func TestSuRecord_RuleSetConcurrentUnlock(t *testing.T) {
 			this.(*SuRecord).SetConcurrent()
 			return SuStr("a_value")
 		},
-		BuiltinParams: BuiltinParams{ParamSpec: ParamSpec0}}
+		ParamSpec: ParamSpec0}
 
 	ruleB := &SuBuiltinMethod{
 		Fn: func(th *Thread, this Value, _ []Value) Value {
 			return SuStr("b_value")
 		},
-		BuiltinParams: BuiltinParams{ParamSpec: ParamSpec0}}
+		ParamSpec: ParamSpec0}
 
-	rec.AttachRule(SuStr("a"), ruleA)
-	rec.AttachRule(SuStr("b"), ruleB)
+	rec.AttachRule(SuStr1("a"), ruleA)
+	rec.AttachRule(SuStr1("b"), ruleB)
 
 	hdr := SimpleHeader([]string{"a", "b"})
 	th := &Thread{}

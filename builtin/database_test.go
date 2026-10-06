@@ -21,8 +21,8 @@ func TestDatabase_Top10(t *testing.T) {
 	db19.StartConcur(db, 50*time.Millisecond)
 	defer db.Close()
 
-	qry.DoAdmin(db, "create tmp (id, c) key(id)", nil)
-	ut := db.NewUpdateTran()
+	qry.DoAdminTest(db, "create tmp (id, c) key(id)")
+	ut := db.NewUpdateTran(AllPerms)
 	id := 1
 	for range 25 {
 		qry.DoAction(nil, ut,
@@ -42,8 +42,9 @@ func TestDatabase_Top10(t *testing.T) {
 	ut.Commit()
 
 	th := &Thread{}
+	th.SetPerms(AllPerms)
 	th.SetDbms(dbms.NewDbmsLocal(db))
-	v := db_Top10(th, []Value{SuStr("tmp"), SuStr("c")})
+	v := db_Top10(th, []Value{SuStr("tmp"), SuStr1("c")})
 	ob := v.(*SuObject)
 
 	assert.T(t).This(ob.Size()).Is(10)
@@ -56,19 +57,20 @@ func TestDatabase_Distinct(t *testing.T) {
 	db19.StartConcur(db, 50*time.Millisecond)
 	defer db.Close()
 
-	qry.DoAdmin(db, "create tmp (a, b, c) key(a) index(b,c)", nil)
-	ut := db.NewUpdateTran()
+	qry.DoAdminTest(db, "create tmp (a, b, c) key(a) index(b,c)")
+	ut := db.NewUpdateTran(AllPerms)
 	qry.DoAction(nil, ut, "insert { a: 1, b: 'x', c: 10 } into tmp")
 	qry.DoAction(nil, ut, "insert { a: 2, b: 'x', c: 20 } into tmp")
 	qry.DoAction(nil, ut, "insert { a: 3, b: 'y', c: 20 } into tmp")
 	ut.Commit()
 
 	th := &Thread{}
+	th.SetPerms(AllPerms)
 	th.SetDbms(dbms.NewDbmsLocal(db))
 	v := db_Distinct(th, []Value{SuStr("tmp")})
 	ob := v.(*SuObject)
 
-	assert.T(t).This(ToInt(ob.Get(nil, SuStr("a")))).Is(3)
-	assert.T(t).This(ToInt(ob.Get(nil, SuStr("b")))).Is(2)
-	assert.T(t).This(ToInt(ob.Get(nil, SuStr("c")))).Is(2)
+	assert.T(t).This(ToInt(ob.Get(nil, SuStr1("a")))).Is(3)
+	assert.T(t).This(ToInt(ob.Get(nil, SuStr1("b")))).Is(2)
+	assert.T(t).This(ToInt(ob.Get(nil, SuStr1("c")))).Is(2)
 }

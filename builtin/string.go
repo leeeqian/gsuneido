@@ -73,22 +73,7 @@ func string_Asc(this Value) Value {
 	if s == "" {
 		return Zero
 	}
-	return SuInt(int(s[0]))
-}
-
-// TODO remove after we switch to Suneido.Compile (after jSuneido is gone)
-var _ = method(string_Compile, "(errob = false) :unknown")
-
-func string_Compile(th *Thread, this Value, args []Value) Value {
-	if args[0] == False {
-		return compile.Constant(ToStr(this))
-	}
-	ob := ToContainer(args[0])
-	val, checks := compile.Checked(th, ToStr(this))
-	for _, w := range checks {
-		ob.Add(SuStr(w))
-	}
-	return val
+	return SuInt16(int(s[0]))
 }
 
 var _ = method(string_Count, "(string :string) :number")
@@ -129,6 +114,7 @@ func string_Eval2(th *Thread, this Value, args []Value) Value {
 		for _, val := range slices.Backward(th.ReturnMulti) {
 			ob.Add(val)
 		}
+		th.ClearReturnMulti()
 	}
 	return ob
 }
@@ -309,7 +295,7 @@ func string_Match(th *Thread, this Value, args []Value) Value {
 	for i := 0; i < len(cap); i += 2 {
 		org, end := int(cap[i]), int(cap[i+1])
 		if org >= 0 {
-			ob.Set(SuInt(i/2), SuObjectOf(IntVal(org), IntVal(end-org)))
+			ob.Set(SuInt16(i/2), SuObjectOf(IntVal(org), IntVal(end-org)))
 		}
 	}
 	return ob
@@ -408,12 +394,6 @@ func string_Reverse(this Value) Value {
 		hi--
 	}
 	return SuStr(hacks.BStoS(s))
-}
-
-var _ = method(string_ServerEval, "() :unknown")
-
-func string_ServerEval(th *Thread, this Value, args []Value) Value {
-	return th.Dbms().Run(th, ToStr(this))
 }
 
 var _ = method(string_Size, "() :number")

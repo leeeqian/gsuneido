@@ -27,9 +27,7 @@ type QueryHash struct {
 }
 
 func NewQueryHasher(hdr *Header) *QueryHash {
-	qh := QueryHash{}
-	qh.Hdr = hdr
-	qh.Fields = slc.Clone(hdr.Physical())
+	qh := QueryHash{Hdr: hdr, Fields: slc.Clone(hdr.Physical())}
 	slices.Sort(qh.Fields)
 	cols := slc.Clone(hdr.Columns)
 	slices.Sort(cols)
@@ -104,11 +102,11 @@ func (qh *QueryHash) Result(details bool) Value {
 		return SuStr(fmt.Sprintln("nrows", qh.nrows, "hash", qh.hash,
 			"ncols", qh.ncols, "hash", qh.colsHash))
 	}
-	return IntVal(int(qh.hash))
+	return IntVal(qh.hash)
 }
 
 func queryHashAll(db *db19.Database, query string) {
-	tran := db.NewReadTran()
+	tran := db.NewReadTran(AllPerms)
 	q := ParseQuery(query, tran, nil)
 	q, _, _ = Setup(q, ReadMode, tran)
 	th := &Thread{}

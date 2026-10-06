@@ -31,11 +31,11 @@ func heapDb() heapdb {
 }
 
 func (hdb heapdb) adm(admin string) {
-	DoAdmin(hdb.Database, admin, nil)
+	DoAdminTest(hdb.Database, admin)
 }
 
 func (hdb heapdb) act(act string) {
-	ut := hdb.NewUpdateTran()
+	ut := hdb.NewUpdateTran(AllPerms)
 	defer ut.Commit()
 	DoAction(nil, ut, act)
 }
@@ -145,6 +145,6 @@ func (t sizeTran) GetInfo(table string) *meta.Info {
 	if table == "trans" || table == "hist" || table == "hist2" {
 		ti.Nrows = 10_000
 	}
-	ti.Size = int64(ti.Nrows) * 100
+	ti.Size = ti.Nrows * 100
 	return &ti
 }

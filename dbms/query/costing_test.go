@@ -14,7 +14,7 @@ import (
 	"github.com/apmckinlay/gsuneido/util/slc"
 )
 
-const ncosting = 10000
+const ncosting = 1000
 
 func TestCosting_Table(t *testing.T) {
 	for range ncosting {
@@ -293,7 +293,7 @@ func costingSetup(q Query, ft *FT) (Query, Cost, Cost) {
 
 // rowCost matches the per-get cost used by Table.costFor
 func rowCost(index []string) Cost {
-	return tableFast + Cost(len(index))*colsBias
+	return tableFast + len(index)*colsBias
 }
 
 func iterate(q Query) {

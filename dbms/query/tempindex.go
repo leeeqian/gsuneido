@@ -6,8 +6,10 @@ package query
 import (
 	"log"
 	"slices"
+	"strings"
 
 	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19/index/iface"
 	"github.com/apmckinlay/gsuneido/db19/index/ixkey"
 	"github.com/apmckinlay/gsuneido/util/assert"
 	"github.com/apmckinlay/gsuneido/util/sortlist"
@@ -28,7 +30,7 @@ type TempIndex struct {
 	order  []string
 	selOrg []string
 	selEnd []string
-	state
+	state  iface.State
 }
 
 var selMin []string
@@ -39,11 +41,11 @@ const derivedWarn = 8_000_000 // ??? // derivedWarn is also used by Project
 
 func NewTempIndex(src Query, order []string, tran QueryTran) *TempIndex {
 	order = src.Fixed().RemoveFrom(order)
-	ti := TempIndex{order: order, tran: tran, selOrg: selMin, selEnd: selMax}
-	ti.source = src
-	ti.header = src.Header().Dup() // dup because sortlist is concurrent
-	ti.keys = src.Keys()
-	ti.fixed = src.Fixed()
+	ti := TempIndex{order: order, tran: tran, selOrg: selMin, selEnd: selMax,
+		source: src,
+		header: src.Header().Dup(), // dup because sortlist is concurrent
+		keys:   src.Keys(),
+		fixed:  src.Fixed()}
 	ti.setNrows(src.Nrows())
 	ti.rowSiz.Set(src.rowSize())
 	ti.singleTbl.Set(src.SingleTable())
@@ -81,7 +83,7 @@ func (ti *TempIndex) Rewind() {
 	if ti.iter != nil {
 		ti.iter.Rewind()
 	}
-	ti.state = rewound
+	ti.state = iface.Rewound
 }
 
 func (ti *TempIndex) Select(sels Sels) {
@@ -139,8 +141,9 @@ func (ti *TempIndex) makeKey(sels Sels, full bool) []string {
 }
 
 func (ti *TempIndex) matches(row Row, key []string) bool {
+	rr := NewRowRec(row, ti.header, ti.th, ti.st)
 	for i, col := range ti.order {
-		x := row.GetRawVal(ti.header, col, ti.th, ti.st)
+		x := rr.GetRawVal(col)
 		y := key[i]
 		if x != y {
 			return false
@@ -153,14 +156,14 @@ func (ti *TempIndex) Get(th *Thread, dir Dir) Row {
 	defer func(t uint64) { ti.tget += tsc.Read() - t }(tsc.Read())
 	ti.th = th
 	defer func() { ti.th = nil }()
-	if ti.conflict() || ti.state == eof {
+	if ti.conflict() || ti.state.Eof() {
 		return nil
 	}
 	if ti.iter == nil {
 		ti.iter = ti.makeIndex()
 	}
 	var row Row
-	if ti.state == rewound {
+	if ti.state.Rewound() {
 		if dir == Next {
 			row = ti.iter.Seek(ti.selOrg)
 		} else { // Prev
@@ -170,12 +173,12 @@ func (ti *TempIndex) Get(th *Thread, dir Dir) Row {
 			}
 			row = ti.iter.Get(dir)
 		}
-		ti.state = within
+		ti.state = iface.Within
 	} else {
 		row = ti.iter.Get(dir)
 	}
 	if row == nil || !ti.selected(row) {
-		ti.state = eof
+		ti.state = iface.Eof
 		return nil
 	}
 	ti.ngets++
@@ -202,9 +205,10 @@ func (ti *TempIndex) selected(row Row) bool {
 	if ti.satisfied() {
 		return true
 	}
+	rr := NewRowRec(row, ti.header, ti.th, ti.st)
 	for i, sel := range ti.selOrg {
 		col := ti.order[i]
-		x := row.GetRawVal(ti.header, col, ti.th, ti.st)
+		x := rr.GetRawVal(col)
 		if x != sel {
 			return false
 		}
@@ -232,7 +236,8 @@ type singleIter struct {
 }
 
 func (ti *TempIndex) single() rowIter {
-	var th2 Thread // separate thread because sortlist runs in the background
+	th2 := NewThread(ti.th) // sortlist runs in the background
+	defer th2.Close()
 	xrow := Row{DbRec{}}
 	yrow := Row{DbRec{}}
 	b := sortlist.NewSorting(
@@ -240,7 +245,7 @@ func (ti *TempIndex) single() rowIter {
 		func(x, y DbRec) bool {
 			xrow[0] = x
 			yrow[0] = y
-			return ti.less(&th2, xrow, yrow)
+			return ti.less(th2, xrow, yrow)
 		})
 	nrows := 0
 	warned := false
@@ -268,11 +273,13 @@ func (ti *TempIndex) single() rowIter {
 }
 
 func (ti *TempIndex) less(th *Thread, xrow, yrow Row) bool {
+	xrr := NewRowRec(xrow, ti.header, th, ti.st)
+	yrr := NewRowRec(yrow, ti.header, th, ti.st)
 	for _, col := range ti.order {
-		x := xrow.GetRawVal(ti.header, col, th, ti.st)
-		y := yrow.GetRawVal(ti.header, col, th, ti.st)
-		if x != y {
-			return x < y
+		x := xrr.GetRawVal(col)
+		y := yrr.GetRawVal(col)
+		if cmp := strings.Compare(x, y); cmp != 0 {
+			return cmp < 0
 		}
 	}
 	return false
@@ -281,6 +288,7 @@ func (ti *TempIndex) less(th *Thread, xrow, yrow Row) bool {
 // less2 is used for Seek
 func (ti *TempIndex) less2(th *Thread, row Row, key []string) bool {
 	n := max(len(ti.order), len(key))
+	rr := NewRowRec(row, ti.header, th, ti.st)
 	for i := range n {
 		if i >= len(key) {
 			return false
@@ -288,10 +296,10 @@ func (ti *TempIndex) less2(th *Thread, row Row, key []string) bool {
 		if i >= len(ti.order) {
 			return true
 		}
-		x := row.GetRawVal(ti.header, ti.order[i], th, ti.st)
+		x := rr.GetRawVal(ti.order[i])
 		y := key[i]
-		if x != y {
-			return x < y
+		if cmp := strings.Compare(x, y); cmp != 0 {
+			return cmp < 0
 		}
 	}
 	return false
@@ -331,11 +339,12 @@ type multiIter struct {
 }
 
 func (ti *TempIndex) multi() rowIter {
-	var th2 Thread // separate thread because sortlist runs in the background
+	th2 := NewThread(ti.th) // sortlist runs in the background
+	defer th2.Close()
 	b := sortlist.NewSorting(
 		func(row Row) bool { return row == nil },
 		func(xrow, yrow Row) bool {
-			return ti.less(&th2, xrow, yrow)
+			return ti.less(th2, xrow, yrow)
 		})
 	nrows := 0
 	warned := false
@@ -405,9 +414,11 @@ func (ti *TempIndex) knowExactNrows() bool {
 func (ti *TempIndex) Simple(th *Thread) []Row {
 	rows := ti.source.Simple(th)
 	slices.SortFunc(rows, func(a, b Row) int {
+		arr := NewRowRec(a, ti.header, th, ti.st)
+		brr := NewRowRec(b, ti.header, th, ti.st)
 		for _, col := range ti.order {
-			x := a.GetRawVal(ti.header, col, th, ti.st)
-			y := b.GetRawVal(ti.header, col, th, ti.st)
+			x := arr.GetRawVal(col)
+			y := brr.GetRawVal(col)
 			if x < y {
 				return -1
 			}

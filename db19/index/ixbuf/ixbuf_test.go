@@ -452,7 +452,7 @@ func TestIterRange(t *testing.T) {
 	it := ib.Iterator().(*Iterator)
 	test := func(fn func(), expected string) {
 		fn()
-		assert.That(it.state == within)
+		assert.That(it.state.Within())
 		assert.This(it.cur.key).Is(expected)
 	}
 	test(it.Next, "a")
@@ -699,7 +699,6 @@ func BenchmarkSkipScanBreakevenVsFullScan(b *testing.B) {
 	fullExpected := groups * maxWidth
 
 	for _, width := range widths {
-		width := width
 		endSuffix := startSuffix + width
 		org := fmt.Sprintf("%0*d", suffixWidth, startSuffix)
 		end := fmt.Sprintf("%0*d", suffixWidth, endSuffix)

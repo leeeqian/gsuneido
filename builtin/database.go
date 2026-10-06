@@ -24,16 +24,16 @@ func init() {
 }
 
 func Database(th *Thread, args []Value) Value {
-	th.Dbms().Admin(ToStr(args[0]), th.Sviews())
+	th.Dbms().Admin(ToStr(args[0]), th.Sviews(), th.Perms())
 	return nil
 }
 
 var databaseMethods = methods("db")
 
-var _ = staticMethod(db_Auth, "(data :string) :boolean")
+var _ = staticMethod(db_Auth, "(@args)")
 
 func db_Auth(th *Thread, args []Value) Value {
-	return SuBool(th.Dbms().Auth(th, ToStr(args[0])))
+	return SuBool(th.Dbms().Auth(th, args[0]))
 }
 
 var _ = staticMethod(db_Check, "() :string")
@@ -57,7 +57,7 @@ func db_Connections(th *Thread, args []Value) Value {
 var _ = staticMethod(db_CurrentSize, "() :number")
 
 func db_CurrentSize(th *Thread, args []Value) Value {
-	return IntVal(int(th.Dbms().Size()))
+	return IntVal(th.Dbms().Size())
 }
 
 var _ = staticMethod(db_Cursors, "() :number")
@@ -109,12 +109,6 @@ func db_Load(th *Thread, args []Value) Value {
 		SuObjectOf(SuStr("Database.Load"), args[0], args[1], args[2], args[3]))
 }
 
-var _ = staticMethod(db_Nonce, "() :string")
-
-func db_Nonce(th *Thread, args []Value) Value {
-	return SuStr(th.Dbms().Nonce(th))
-}
-
 var _ = staticMethod(db_Schema, "(table :string) :string")
 
 func db_Schema(th *Thread, args []Value) Value {
@@ -131,12 +125,6 @@ var _ = staticMethod(db_TempDest, "() :number")
 
 func db_TempDest() Value {
 	return Zero
-}
-
-var _ = staticMethod(db_Token, "() :string")
-
-func db_Token(th *Thread, args []Value) Value {
-	return SuStr(th.Dbms().Token())
 }
 
 var _ = staticMethod(db_Transactions, "() :object")
@@ -160,7 +148,7 @@ func db_Top10(th *Thread, args []Value) Value {
 	table := ToStr(args[0])
 	column := ToStr(args[1])
 
-	tran := th.Dbms().Transaction(false)
+	tran := th.Dbms().Transaction(false, th.Perms())
 	defer tran.Complete()
 
 	sk := ss.New[string](128)
@@ -177,7 +165,7 @@ func db_Top10(th *Thread, args []Value) Value {
 
 	result := &SuObject{}
 	for _, e := range top {
-		result.Set(Unpack(e.Value), IntVal(int(e.Count-e.Error)))
+		result.Set(Unpack(e.Value), IntVal(e.Count-e.Error))
 	}
 	return result
 }
@@ -186,7 +174,7 @@ var _ = staticMethod(db_Distinct, "(table :string) :object")
 
 func db_Distinct(th *Thread, args []Value) Value {
 	table := ToStr(args[0])
-	t := th.Dbms().Transaction(false)
+	t := th.Dbms().Transaction(false, th.Perms())
 	defer t.Complete()
 	rt := t.(*dbms.ReadTranLocal).ReadTran
 	cols := indexedColumns(rt.GetSchema(table).Indexes)
@@ -203,7 +191,7 @@ func db_Distinct(th *Thread, args []Value) Value {
 	}
 	ob := &SuObject{}
 	for i, col := range cols {
-		ob.Set(SuStr(col), Int64Val(int64(sketches[i].Count())))
+		ob.Set(SuStr(col), IntVal(sketches[i].Count()))
 	}
 	return ob
 }

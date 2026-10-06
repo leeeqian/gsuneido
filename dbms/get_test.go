@@ -62,8 +62,8 @@ func TestGetWhere(t *testing.T) {
 
 	// Multiple fields - check structure
 	obj4 := &SuObject{}
-	obj4.Set(SuStr("a"), SuInt(1))
-	obj4.Set(SuStr("b"), SuInt(2))
+	obj4.Set(SuStr1("a"), SuInt16(1))
+	obj4.Set(SuStr1("b"), SuInt16(2))
 	w := getWhere(obj4)
 	assert.T(t).True(strings.HasPrefix(w, "where "))
 	assert.T(t).True(strings.Contains(w, "\nand "))
@@ -158,9 +158,9 @@ func TestGetOnlyUniqueIndex(t *testing.T) {
 	db := db19.CreateDb(stor.HeapStor(8192))
 	db19.StartConcur(db, 50*time.Millisecond)
 	defer db.Close()
-	qry.DoAdmin(db, "create tmp (k, u, data) key(k) index unique(u)", nil)
+	qry.DoAdminTest(db, "create tmp (k, u, data) key(k) index unique(u)")
 	act := func(action string) {
-		ut := db.NewUpdateTran()
+		ut := db.NewUpdateTran(AllPerms)
 		defer ut.Commit()
 		qry.DoAction(nil, ut, action)
 	}
@@ -168,12 +168,12 @@ func TestGetOnlyUniqueIndex(t *testing.T) {
 	act("insert { k: 2, u: '', data: 'second' } into tmp")
 	act("insert { k: 3, u: 'x', data: 'third' } into tmp")
 
-	tran := db.NewReadTran()
+	tran := db.NewReadTran(AllPerms)
 	defer tran.Complete()
 	th := &Thread{}
 	ob := &SuObject{}
 	ob.Set(SuStr("query"), SuStr("tmp"))
-	ob.Set(SuStr("u"), SuStr("x"))
+	ob.Set(SuStr1("u"), SuStr1("x"))
 	row, hdr, _ := get(th, tran, ob, Only)
 	assert.T(t).Msg("get Only u=x").
 		This(AsStr(row.GetVal(hdr, "u", nil, nil))).Is("x")
@@ -198,16 +198,16 @@ func TestGetOnlyUniqueIndexEmpty(t *testing.T) {
 	db := db19.CreateDb(stor.HeapStor(8192))
 	db19.StartConcur(db, 50*time.Millisecond)
 	defer db.Close()
-	qry.DoAdmin(db, "create tmp (k, u, data) key(k) index unique(u)", nil)
+	qry.DoAdminTest(db, "create tmp (k, u, data) key(k) index unique(u)")
 	act := func(action string) {
-		ut := db.NewUpdateTran()
+		ut := db.NewUpdateTran(AllPerms)
 		defer ut.Commit()
 		qry.DoAction(nil, ut, action)
 	}
 	act("insert { k: 1, u: '', data: 'first' } into tmp")
 	act("insert { k: 2, u: '', data: 'second' } into tmp")
 
-	tran := db.NewReadTran()
+	tran := db.NewReadTran(AllPerms)
 	defer tran.Complete()
 	th := &Thread{}
 	tbl := qry.NewTable(tran, "tmp").(*qry.Table)
@@ -301,8 +301,103 @@ func TestFormatFieldsVals(t *testing.T) {
 	test(Sels{qry.NewSel("name", Pack(SuStr("John")))}, `name: "John"`)
 
 	// Multiple fields
-	test(Sels{qry.NewSel("name", Pack(SuStr("John"))), qry.NewSel("age", Pack(SuInt(30)))}, `name: "John", age: 30`)
+	test(Sels{qry.NewSel("name", Pack(SuStr("John"))), qry.NewSel("age", Pack(SuInt16(30)))}, `name: "John", age: 30`)
 
 	// Empty
 	test(Sels{}, "")
+}
+
+func TestGetSchema(t *testing.T) {
+	db := db19.CreateDb(stor.HeapStor(8192))
+	db19.StartConcur(db, 50*time.Millisecond)
+	defer db.Close()
+	qry.DoAdminTest(db, "create tmp (k, u, data, Foo) key(k) index unique(u)")
+	qry.DoAdminTest(db, "view myview = tmp")
+
+	tran := db.NewReadTran(AllPerms)
+	defer tran.Complete()
+	th := &Thread{}
+
+	// lookup a schema table by its key, returning the row and header
+	test := func(table string, sels ...[2]string) (Row, *Header) {
+		t.Helper()
+		ob := &SuObject{}
+		ob.Add(SuStr(table))
+		for _, sel := range sels {
+			ob.Set(SuStr(sel[0]), SuStr(sel[1]))
+		}
+		row, hdr, _ := get(th, tran, ob, Only)
+		return row, hdr
+	}
+	val := func(row Row, hdr *Header, col string) string {
+		t.Helper()
+		if row == nil {
+			return "<nil>"
+		}
+		return AsStr(row.GetVal(hdr, col, nil, nil))
+	}
+
+	// tables - real table, virtual schema table, and nonexistent
+	row, hdr := test("tables", [2]string{"table", "tmp"})
+	assert.T(t).Msg("tables tmp").This(val(row, hdr, "table")).Is("tmp")
+	row, hdr = test("tables", [2]string{"table", "tables"})
+	assert.T(t).Msg("tables tables").This(val(row, hdr, "table")).Is("tables")
+	row, _ = test("tables", [2]string{"table", "nosuch"})
+	assert.T(t).Msg("tables nosuch").This(row).Is(nil)
+
+	// columns - regular, derived (uncapitalized), virtual, and nonexistent
+	row, hdr = test("columns", [2]string{"table", "tmp"}, [2]string{"column", "u"})
+	assert.T(t).Msg("columns tmp u").This(val(row, hdr, "field")).Is("1")
+	row, hdr = test("columns", [2]string{"table", "tmp"}, [2]string{"column", "foo"})
+	assert.T(t).Msg("columns tmp foo (derived)").
+		This(val(row, hdr, "column")).Is("foo")
+	assert.T(t).Msg("columns tmp foo field").This(val(row, hdr, "field")).Is("-1")
+	row, _ = test("columns", [2]string{"table", "tmp"}, [2]string{"column", "nosuch"})
+	assert.T(t).Msg("columns tmp nosuch").This(row).Is(nil)
+	row, hdr = test("columns", [2]string{"table", "tables"}, [2]string{"column", "nrows"})
+	assert.T(t).Msg("columns tables nrows (virtual)").
+		This(val(row, hdr, "field")).Is("1")
+	row, _ = test("columns", [2]string{"table", "nosuch"}, [2]string{"column", "x"})
+	assert.T(t).Msg("columns nosuch (no panic)").This(row).Is(nil)
+
+	// indexes - key, unique index, and nonexistent table
+	row, hdr = test("indexes", [2]string{"table", "tmp"}, [2]string{"columns", "k"})
+	assert.T(t).Msg("indexes tmp k").This(val(row, hdr, "key")).Is("true")
+	row, hdr = test("indexes", [2]string{"table", "tmp"}, [2]string{"columns", "u"})
+	assert.T(t).Msg("indexes tmp u").This(val(row, hdr, "key")).Is("u")
+	row, _ = test("indexes", [2]string{"table", "nosuch"}, [2]string{"columns", "x"})
+	assert.T(t).Msg("indexes nosuch (no panic)").This(row).Is(nil)
+
+	// views
+	row, hdr = test("views", [2]string{"view_name", "myview"})
+	assert.T(t).Msg("views myview").This(val(row, hdr, "view_definition")).Is("tmp")
+	row, _ = test("views", [2]string{"view_name", "nosuch"})
+	assert.T(t).Msg("views nosuch").This(row).Is(nil)
+}
+
+// TestGetSchemaNoSels verifies that querying a schema table with no sels
+// does not panic (eg. indexing into a nil Indexes) and instead falls back
+// to the normal query path.
+func TestGetSchemaNoSels(t *testing.T) {
+	db := db19.CreateDb(stor.HeapStor(8192))
+	db19.StartConcur(db, 50*time.Millisecond)
+	defer db.Close()
+	qry.DoAdminTest(db, "create tmp (k, u, data) key(k) index unique(u)")
+
+	tran := db.NewReadTran(AllPerms)
+	defer tran.Complete()
+	th := &Thread{}
+
+	test := func(table string, dir Dir, exists bool) {
+		t.Helper()
+		ob := &SuObject{}
+		ob.Add(SuStr(table))
+		row, hdr, _ := get(th, tran, ob, dir)
+		assert.T(t).Msg(table, " ", dir, " hdr").This(hdr != nil).Is(exists)
+		assert.T(t).Msg(table, " ", dir, " row").This(row != nil).Is(exists)
+	}
+	for _, table := range []string{"tables", "columns", "indexes", "views", "dbstats"} {
+		test(table, Any, table != "views" && table != "dbstats")
+		test(table, Strat, true)
+	}
 }

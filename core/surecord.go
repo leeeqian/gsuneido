@@ -97,7 +97,7 @@ func SuRecordFromObject(ob *SuObject) *SuRecord {
 
 func SuRecordFromRow(row Row, hdr *Header, table string, tran *SuTran) *SuRecord {
 	rec := SuRecord{ob: SuObject{defval: EmptyStr},
-		suRec: suRec{row: row, hdr: hdr, tran: tran, userow: true, status: OLD}}
+		row: row, hdr: hdr, tran: tran, userow: true, status: OLD}
 	if table != "" {
 		rec.table = table
 		rec.recoff = row[0].Off
@@ -142,14 +142,13 @@ func (r *SuRecord) Copy() Container {
 func (r *SuRecord) slice(n int) *SuRecord {
 	// keep row and hdr even if unpacked, to help ToRecord
 	return &SuRecord{
-		ob: *r.ob.slice(n),
-		suRec: suRec{
-			row:        r.row,
-			hdr:        r.safeHdr(),
-			userow:     r.userow,
-			status:     r.status,
-			dependents: r.copyDeps(),
-			invalid:    r.copyInvalid()}}
+		ob:         *r.ob.slice(n),
+		row:        r.row,
+		hdr:        r.safeHdr(),
+		userow:     r.userow,
+		status:     r.status,
+		dependents: r.copyDeps(),
+		invalid:    r.copyInvalid()}
 }
 
 func (r *SuRecord) safeHdr() *Header {
@@ -359,33 +358,29 @@ func (r *SuRecord) IsNew() bool {
 	return r.status == NEW
 }
 
-func (r *SuRecord) Delete(th *Thread, key Value) bool {
+func (r *SuRecord) Delete(th *Thread, key Value) Value {
 	return r.delete(th, key, r.ob.delete)
 }
 
-func (r *SuRecord) Erase(th *Thread, key Value) bool {
+func (r *SuRecord) Erase(th *Thread, key Value) Value {
 	return r.delete(th, key, r.ob.erase)
 }
 
-func (r *SuRecord) delete(th *Thread, key Value, fn func(Value) bool) bool {
+func (r *SuRecord) delete(th *Thread, key Value, fn func(Value) Value) Value {
 	r.Lock()
 	defer r.Unlock()
 	r.ensureDeps()
 	r.ob.mustBeMutable()
-	// have to unpack
-	// because we have no way to delete from row
 	r.toObject()
-	// have to remove row
-	// because we assume if field is missing from object we can use row data
 	r.row = nil
-	if fn(key) {
+	v := fn(key)
+	if v != nil {
 		if keystr, ok := key.ToStr(); ok {
 			r.invalidateDependents(keystr)
 			r.callObservers(th, keystr)
 		}
-		return true
 	}
-	return false
+	return v
 }
 
 func (r *SuRecord) ListSize() int {
@@ -767,8 +762,7 @@ func WrapPanic(th *Thread, e any, suffix string) {
 		s := string(e.SuStr) + " (" + suffix + ")"
 		panic(&SuExcept{SuStr: SuStr(s), Callstack: e.Callstack})
 	case error:
-		var perr runtime.Error
-		if errors.As(e, &perr) {
+		if _, ok := errors.AsType[runtime.Error](e); ok {
 			dbg.PrintStack()
 			th.PrintStack()
 		}
@@ -954,7 +948,7 @@ func (r *SuRecord) PackSize(hash *uint64) int {
 	return r.ToObject().PackSize(hash)
 }
 
-func (r *SuRecord) PackSize2(hash *uint64, stack packStack) int {
+func (r *SuRecord) PackSize2(hash *uint64, stack PackStack) int {
 	return r.ToObject().PackSize2(hash, stack)
 }
 

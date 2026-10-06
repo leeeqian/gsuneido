@@ -112,9 +112,9 @@ func (a *Trinary) Get(_ *Thread, m Value) Value {
 		return SuStr("Trinary")
 	case SuStr("cond"):
 		return a.Cond.(Value)
-	case SuStr("t"):
+	case SuStr1("t"):
 		return a.T.(Value)
-	case SuStr("f"):
+	case SuStr1("f"):
 		return a.F.(Value)
 	}
 	return falsePos(a, m)
@@ -195,7 +195,7 @@ func (a *Mem) Get(_ *Thread, m Value) Value {
 	case SuStr("mem"):
 		return a.M.(Value)
 	case SuStr("dotpos"):
-		return IntVal(int(a.DotPos))
+		return IntVal(a.DotPos)
 	}
 	return falsePos(a, m)
 }
@@ -281,9 +281,9 @@ func (a *Function) Get(_ *Thread, m Value) Value {
 	case SuStr("pos"):
 		return IntVal(a.GetPos())
 	case SuStr("pos1"):
-		return IntVal(int(a.Pos1))
+		return IntVal(a.Pos1)
 	case SuStr("pos2"):
-		return IntVal(int(a.Pos2))
+		return IntVal(a.Pos2)
 	case SuStr("end"):
 		return IntVal(a.GetEnd())
 	case SuStr("children"):
@@ -381,15 +381,15 @@ func (a *If) Get(_ *Thread, m Value) Value {
 		return SuStr("If")
 	case SuStr("cond"):
 		return a.Cond.(Value)
-	case SuStr("t"):
+	case SuStr1("t"):
 		return a.Then.(Value)
-	case SuStr("f"):
+	case SuStr1("f"):
 		if a.Else == nil {
 			return False
 		}
 		return a.Else.(Value)
 	case SuStr("elseend"):
-		return IntVal(int(a.ElseEnd))
+		return IntVal(a.ElseEnd)
 	}
 	return stmtGet(a, m)
 }
@@ -403,11 +403,11 @@ func (a *Switch) Get(_ *Thread, m Value) Value {
 	case SuStr("size"):
 		return IntVal(len(a.Cases))
 	case SuStr("pos1"):
-		return IntVal(int(a.Pos1))
+		return IntVal(a.Pos1)
 	case SuStr("pos2"):
-		return IntVal(int(a.Pos2))
+		return IntVal(a.Pos2)
 	case SuStr("posdef"):
-		return IntVal(int(a.PosDef))
+		return IntVal(a.PosDef)
 	case SuStr("def"):
 		if a.Default == nil {
 			return False
@@ -464,6 +464,8 @@ func (a *Return) Get(_ *Thread, m Value) Value {
 		return a.Exprs[0].(Value)
 	case SuStr("throw"):
 		return SuBool(a.ReturnThrow)
+	case SuStr("spread"):
+		return SuBool(a.ReturnSpread)
 	}
 	return stmtGet(a, m)
 }
@@ -498,7 +500,7 @@ func (a *TryCatch) Get(_ *Thread, m Value) Value {
 	case SuStr("try"):
 		return a.Try.(Value)
 	case SuStr("catchend"):
-		return IntVal(int(a.CatchEnd))
+		return IntVal(a.CatchEnd)
 	case SuStr("catch"):
 		return nilToFalse(a.Catch)
 	case SuStr("catchvar"):
@@ -610,9 +612,9 @@ func (a *Continue) Get(_ *Thread, m Value) Value {
 func (a *ExprPos) Get(t *Thread, m Value) Value {
 	switch m {
 	case SuStr("pos"):
-		return IntVal(int(a.Pos))
+		return IntVal(a.Pos)
 	case SuStr("end"):
-		return IntVal(int(a.End))
+		return IntVal(a.End)
 	}
 	return a.Expr.Get(t, m)
 }

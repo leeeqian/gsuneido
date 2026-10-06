@@ -91,10 +91,8 @@ func codegen(lib, name string, fn *ast.Function, prevDef Value) Value {
 func codegen2(lib, name string, fn *ast.Function, isBlock bool,
 	prevDef Value) *SuFunc {
 	cover := options.Coverage.Load()
-	cg := cgen{fn: fn, base: fn.Base, isNew: fn.IsNewMethod,
-		isBlock: isBlock, cover: cover, prevDef: prevDef}
-	cg.Lib = lib
-	cg.Name = name
+	cg := cgen{fn: fn, base: fn.Base, isNew: fn.IsNewMethod, isBlock: isBlock,
+		cover: cover, prevDef: prevDef, Lib: lib, Name: name}
 	return cg.codegen(fn)
 }
 
@@ -175,9 +173,9 @@ func codegenClosureBlock(ast *ast.Function, outercg *cgen) (*SuFunc, []string) {
 		base:    outercg.base,
 		isBlock: true,
 		cover:   outercg.cover,
-	}
-	cg.Lib = outercg.Lib
-	cg.Name = outercg.Name
+
+		Lib:  outercg.Lib,
+		Name: outercg.Name}
 
 	f := cg.codegen(ast)
 
@@ -244,6 +242,7 @@ var tok2op = [tok.Ntokens]op.Opcode{
 
 func (cg *cgen) function(fn *ast.Function) {
 	cg.params(fn.Params)
+	cg.ReturnAnnotation = fn.ReturnAnnotation
 	cg.chainNew(fn)
 	stmts := fn.Body
 	cg.firstStatement = true
@@ -255,13 +254,19 @@ func (cg *cgen) function(fn *ast.Function) {
 
 func (cg *cgen) params(params []ast.Param) {
 	cg.Nparams = uint8(len(params))
-	for _, p := range params {
+	for i, p := range params {
 		name, flags := param(p.Name.Name)
 		if flags == AtParam && len(params) != 1 {
 			panic("@param must be the only parameter")
 		}
 		cg.Names = append(cg.Names, name) // no duplicate reuse
 		cg.Flags = append(cg.Flags, flags)
+		if p.Annotations != "" && flags != AtParam {
+			if cg.ParamAnnotations == nil {
+				cg.ParamAnnotations = make([]string, len(params))
+			}
+			cg.ParamAnnotations[i] = p.Annotations
+		}
 		if p.DefVal != nil {
 			cg.Ndefaults++
 			cg.Values = append(cg.Values, p.DefVal) // no duplicate reuse
@@ -273,7 +278,7 @@ func (cg *cgen) chainNew(fn *ast.Function) {
 	if !fn.IsNewMethod || hasSuperCall(fn.Body) || cg.base <= 0 {
 		return
 	}
-	cg.savePos(int(fn.Position()))
+	cg.savePos(fn.Position())
 	cg.emit(op.This)
 	cg.emitValue(SuStr("New"))
 	cg.emitUint16(op.Super, cg.base)
@@ -379,6 +384,8 @@ func (cg *cgen) statement(node ast.Statement, labels *Labels, lastStmt bool) {
 		cg.exprStmt(node.E, lastStmt)
 	case *ast.MultiAssign:
 		cg.multiAssign(node)
+	case *ast.AtAssign:
+		cg.atAssign(node, lastStmt)
 	default:
 		panic("unexpected statement type " + fmt.Sprintf("%T", node))
 	}
@@ -394,15 +401,25 @@ func (cg *cgen) returnStmt(node *ast.Return, lastStmt bool) {
 	if cg.isNew && len(node.Exprs) > 0 {
 		panic("New cannot return a value")
 	}
-	if len(node.Exprs) > 1 {
+	if node.ReturnSpread {
+		cg.expr2(node.Exprs[0], callNilOk)
 		if cg.isBlock {
-			panic("multiple return values not allowed from a block")
+			cg.emit(op.BlockReturnSpread)
+		} else {
+			cg.emit(op.ReturnSpread)
 		}
+		return
+	}
+	if len(node.Exprs) > 1 {
 		assert.That(!node.ReturnThrow)
 		for _, e := range node.Exprs {
 			cg.expr2(e, callNoNil)
 		}
-		cg.emit(op.ReturnMulti, byte(len(node.Exprs)))
+		if cg.isBlock {
+			cg.emit(op.BlockReturnMulti, byte(len(node.Exprs)))
+		} else {
+			cg.emit(op.ReturnMulti, byte(len(node.Exprs)))
+		}
 		return
 	}
 	var expr ast.Expr
@@ -634,12 +651,29 @@ func (cg *cgen) exprStmt(expr ast.Expr, lastStmt bool) {
 		cg.expr2(expr, callNilOk)
 	} else if _, ok := expr.(*ast.Constant); !ok {
 		cg.expr2(expr, callDiscard)
-		if !lastStmt {
-			if _, ok := expr.(*ast.Call); !ok {
-				cg.emit(op.Pop)
-			}
+		if !discardLeavesNothing(expr) {
+			cg.emit(op.Pop)
 		}
 	}
+}
+
+// discardLeavesNothing determines whether expr2 with callDiscard
+// leaves nothing on the stack.
+// WARNING: this must match expr2 - only Call and Trinary
+// (possibly parenthesized) discard their value.
+func discardLeavesNothing(e ast.Expr) bool {
+	for {
+		u, ok := e.(*ast.Unary)
+		if !ok || u.Tok != tok.LParen {
+			break
+		}
+		e = u.E
+	}
+	switch e.(type) {
+	case *ast.Call, *ast.Trinary:
+		return true
+	}
+	return false
 }
 
 func (cg *cgen) multiAssign(node *ast.MultiAssign) {
@@ -651,6 +685,16 @@ func (cg *cgen) multiAssign(node *ast.MultiAssign) {
 	cg.emit(op.PushReturn, byte(len(refs)))
 	for _, ref := range refs {
 		cg.store(ref)
+		cg.emit(op.Pop)
+	}
+}
+
+func (cg *cgen) atAssign(node *ast.AtAssign, lastStmt bool) {
+	ref := cg.lvalue(node.Lhs)
+	cg.call(node.Rhs.(*ast.Call), callNilOk)
+	cg.emit(op.Gather)
+	cg.store(ref)
+	if !lastStmt {
 		cg.emit(op.Pop)
 	}
 }
@@ -924,18 +968,36 @@ func isUnary(e ast.Expr, tok tok.Token) bool {
 }
 
 func (cg *cgen) trinary(node *ast.Trinary, ct calltype) {
-	// always leave a value on the stack
-	if ct == callDiscard {
-		ct = callNilOk
-	}
 	f, end := -1, -1
 	cg.expr(node.Cond)
 	f = cg.emitJump(op.QMark, f)
+	if ct == callDiscard {
+		// leave nothing on the stack;
+		// calls use Discard which clears ReturnMulti
+		cg.trinaryBranch(node.T)
+		end = cg.emitJump(op.Jump, end)
+		cg.placeLabel(f)
+		cg.trinaryBranch(node.F)
+		cg.placeLabel(end)
+		return
+	}
+	// always leave a value on the stack
 	cg.expr2(node.T, ct)
 	end = cg.emitJump(op.Jump, end)
 	cg.placeLabel(f)
 	cg.expr2(node.F, ct)
 	cg.placeLabel(end)
+}
+
+// trinaryBranch compiles a branch of a trinary in discard context,
+// leaving nothing on the stack.
+func (cg *cgen) trinaryBranch(e ast.Expr) {
+	if discardLeavesNothing(e) {
+		cg.expr2(e, callDiscard)
+	} else {
+		cg.expr2(e, callNilOk)
+		cg.emit(op.Pop)
+	}
 }
 
 func (cg *cgen) inExpr(node *ast.In) {
@@ -1078,7 +1140,7 @@ func (cg *cgen) call(node *ast.Call, ct calltype) {
 // generates code to push the arguments and returns an ArgSpec index
 func (cg *cgen) args(args []ast.Arg) int {
 	if len(args) == 1 {
-		if args[0].Name == SuStr("@") {
+		if args[0].Name == SuStr1("@") {
 			cg.expr(args[0].E)
 			return AsEach
 		} else if args[0].Name == SuStr("@+1") {

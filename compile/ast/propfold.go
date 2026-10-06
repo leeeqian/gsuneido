@@ -5,6 +5,7 @@ package ast
 
 import (
 	"fmt"
+	"slices"
 
 	tok "github.com/apmckinlay/gsuneido/compile/tokens"
 	. "github.com/apmckinlay/gsuneido/core"
@@ -100,6 +101,12 @@ func (f *fold) children(node Node) {
 			}
 			f.childExpr(&node.Lhs[i])
 		}
+		f.childExpr(&node.Rhs)
+		f.values = save
+		return
+	case *AtAssign:
+		f.lvalue = node.Lhs.(*Ident).Name
+		f.childExpr(&node.Lhs)
 		f.childExpr(&node.Rhs)
 		f.values = save
 		return
@@ -289,9 +296,9 @@ func (f *fold) push(id string, val Value) {
 }
 
 func (f *fold) value(id string) Value {
-	for i := len(f.values) - 1; i >= 0; i-- {
-		if f.values[i].id == id {
-			return f.values[i].val
+	for _, v := range slices.Backward(f.values) {
+		if v.id == id {
+			return v.val
 		}
 	}
 	return nil

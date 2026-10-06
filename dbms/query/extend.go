@@ -35,7 +35,7 @@ type Extend struct {
 }
 
 func NewExtend(src Query, cols []string, exprs []ast.Expr) *Extend {
-	e := &Extend{Query1: Query1{source: src}, cols: cols, exprs: exprs}
+	e := &Extend{source: src, cols: cols, exprs: exprs}
 	e.checkDependencies()
 	srcCols := e.source.Columns()
 	if !set.Disjoint(e.cols, srcCols) {
@@ -216,7 +216,12 @@ func (e *Extend) optimize(mode Mode, req Require) (Cost, Cost, any) {
 		}
 		// Extend.Lookup handles extend-column sels via splitSelect + filter,
 		// so strip them before passing to the source.
-		req = UniqueReq(set.Difference(req.cols, e.cols), req.nseeks)
+		srcCols := set.Difference(req.cols, e.cols)
+		if len(srcCols) == 0 && !e.source.fastSingle() {
+			// can't do a keyed Lookup solely on derived columns
+			return impossible, impossible, nil
+		}
+		req = UniqueReq(srcCols, req.nseeks)
 	}
 	fixcost, varcost := Optimize(e.source, mode, req)
 	return fixcost, varcost, nil

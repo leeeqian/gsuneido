@@ -6,11 +6,12 @@ package core
 // IDbms is the interface to the dbms package.
 // The two implementations, DbmsLocal and DbmsClient, are in the dbms package
 type IDbms interface {
-	// Admin executes a schema change (create, alter, drop)
-	Admin(string, *Sviews)
+	// Admin executes a schema change (create, alter, drop).
+	// perms authorize the change; nil denies all.
+	Admin(string, *Sviews, *Perms)
 
 	// Auth authorizes the connection with the server
-	Auth(*Thread, string) bool
+	Auth(*Thread, Value) bool
 
 	// Check checks the database like -check
 	// It returns "" or an error message.
@@ -22,8 +23,9 @@ type IDbms interface {
 	// Connections returns a list of the current server connections
 	Connections() Value
 
-	// Cursor is like a query but independent of any one transaction
-	Cursor(query string, sv *Sviews) ICursor
+	// Cursor is like a query but independent of any one transaction.
+	// perms authorize the transaction used to plan it; nil denies all.
+	Cursor(query string, sv *Sviews, perms *Perms) ICursor
 
 	// Cursors returns the current number of cursors
 	Cursors() int
@@ -31,7 +33,7 @@ type IDbms interface {
 	DisableTrigger(table string)
 	EnableTrigger(table string)
 
-	// Exec is used by the new style ServerEval(...)
+	// Exec is used by ServerEval(...)
 	Exec(th *Thread, args Value) Value
 
 	// Final returns the current number of final transactions
@@ -59,12 +61,6 @@ type IDbms interface {
 	// Log writes to the server's error.log
 	Log(string)
 
-	// Nonce returns a random string from the server
-	Nonce(*Thread) string
-
-	// Run is used by the old style string.ServerEval()
-	Run(th *Thread, code string) Value
-
 	Schema(table string) string
 
 	// SessionId sets and/or returns the session id for the current connection
@@ -76,11 +72,9 @@ type IDbms interface {
 	// Timestamp returns a guaranteed unique date/time
 	Timestamp() SuDate
 
-	// Token returns data to use with Auth
-	Token() string
-
-	// Transaction starts a transaction
-	Transaction(update bool) ITran
+	// Transaction starts a transaction.
+	// perms authorize actions through the transaction; nil denies all.
+	Transaction(update bool, perms *Perms) ITran
 
 	// Transactions returns a list of the outstanding transactions
 	Transactions() *SuObject
@@ -90,9 +84,6 @@ type IDbms interface {
 
 	// Use adds a library to those in use
 	Use(lib string) bool
-
-	// Unwrap removes DbmsUnauth if DbmsAuth
-	Unwrap() IDbms
 }
 
 // ITran is the interface to a dbms transaction,

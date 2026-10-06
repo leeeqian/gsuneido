@@ -11,6 +11,7 @@ import (
 
 	"github.com/apmckinlay/gsuneido/compile/ast"
 	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19/index/iface"
 	"github.com/apmckinlay/gsuneido/util/assert"
 	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/hash"
@@ -30,7 +31,7 @@ type Project struct {
 	prevRow Row
 	curRow  Row
 	projectApproach
-	state
+	state         iface.State
 	unique        bool
 	indexed       bool
 	warned        bool
@@ -112,7 +113,7 @@ func newProject(src Query, cols []string) Query {
 }
 
 func newProject2(src Query, cols []string, includeDeps bool) *Project {
-	p := &Project{Query1: Query1{source: src}}
+	p := &Project{source: src}
 	if hasKey(cols, src.Keys(), src.Fixed()) {
 		p.unique = true
 		if includeDeps {
@@ -330,14 +331,14 @@ func (p *Project) transformRename(r *Rename) Query {
 	var newFrom, newTo []string
 	from := r.from
 	to := r.to
-	for i := len(to) - 1; i >= 0; i-- {
-		ck := to[i]
+	for i, ck := range slices.Backward(to) {
+
 		if p.unique {
-			ck = strings.TrimSuffix(to[i], "_deps")
+			ck = strings.TrimSuffix(ck, "_deps")
 		}
 		if slices.Contains(p.columns, ck) || slices.Contains(newFrom, ck) {
 			newFrom = append(newFrom, from[i])
-			newTo = append(newTo, to[i])
+			newTo = append(newTo, to[i]) // not ck
 		}
 	}
 	slices.Reverse(newFrom)
@@ -541,14 +542,14 @@ func (p *Project) Rewind() {
 }
 
 func (p *Project) rewind() {
-	p.state = rewound
+	p.state = iface.Rewound
 	p.curRow = nil
 	p.prevRow = nil
 }
 
 func (p *Project) Get(th *Thread, dir Dir) Row {
 	defer func(t uint64) { p.tget += tsc.Read() - t }(tsc.Read())
-	if p.state == eof {
+	if p.state.Eof() {
 		return nil
 	}
 	var row Row
@@ -563,10 +564,10 @@ func (p *Project) Get(th *Thread, dir Dir) Row {
 		panic(assert.ShouldNotReachHere())
 	}
 	if row != nil {
-		p.state = within
+		p.state = iface.Within
 		p.ngets++
 	} else {
-		p.state = eof
+		p.state = iface.Eof
 	}
 	return row
 }
@@ -583,7 +584,7 @@ func (p *Project) getSeq(th *Thread, dir Dir) Row {
 				p.curRow = nil
 				return nil
 			}
-			if p.state == rewound || p.curRow == nil ||
+			if p.state.Rewound() || p.curRow == nil ||
 				!p.header.EqualRows(row, p.curRow, th, p.st) {
 				p.prevRow = p.curRow
 				p.curRow = row
@@ -595,7 +596,7 @@ func (p *Project) getSeq(th *Thread, dir Dir) Row {
 		// i.e. output when next record is different
 		// (to get the same records as NEXT)
 
-		if p.state == rewound || (p.prevRow == nil && p.prevDir == Next) {
+		if p.state.Rewound() || (p.prevRow == nil && p.prevDir == Next) {
 			p.prevRow = p.source.Get(th, dir)
 		}
 		p.prevDir = dir
@@ -633,7 +634,7 @@ type rowHash struct {
 func (p *Project) getMap(th *Thread, dir Dir) Row {
 	p.th = th
 	defer func() { p.th = nil }()
-	if p.state == rewound {
+	if p.state.Rewound() {
 		if p.dedup == nil {
 			hfn := func(k rowHash) uint64 { return k.hash }
 			eqfn := func(x, y rowHash) bool {
@@ -664,21 +665,17 @@ func (p *Project) getMap(th *Thread, dir Dir) Row {
 
 func hashCols(row Row, hdr *Header, cols []string, th *Thread, st *SuTran) uint64 {
 	assert.That(th != nil)
+	rr := NewRowRec(row, hdr, th, st)
 	h := uint64(31)
 	for _, col := range cols {
-		x := row.GetRawVal(hdr, col, th, st)
+		x := rr.GetRawVal(col)
 		h = 31*h + hash.String(x)
 	}
 	return h
 }
 func equalCols(x, y Row, hdr *Header, cols []string, th *Thread, st *SuTran) bool {
 	assert.That(th != nil)
-	for _, col := range cols {
-		if x.GetRawVal(hdr, col, th, st) != y.GetRawVal(hdr, col, th, st) {
-			return false
-		}
-	}
-	return true
+	return EqualRows(hdr, x, hdr, y, cols, th, st)
 }
 
 func (p *Project) buildDedup(th *Thread) {

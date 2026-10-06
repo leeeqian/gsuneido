@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19/index/iface"
 	"github.com/apmckinlay/gsuneido/util/set"
 	"github.com/apmckinlay/gsuneido/util/shmap"
 	"github.com/apmckinlay/gsuneido/util/slc"
@@ -28,7 +29,7 @@ type SemiJoin struct {
 	reverse     bool
 	sels1       Sels // from incoming Select, added to source1 probe in reverse mode
 
-	revState      state
+	revState      iface.State
 	indexed       bool
 	row2          Row
 	lookupRow     Row
@@ -120,10 +121,7 @@ func (sj *SemiJoin) getNrows() (int, int) {
 	if n1 == 0 || n2 == 0 || p2 == 0 {
 		return 0, p1
 	}
-	est := n1 * n2 / p2
-	if est > n1 {
-		est = n1
-	}
+	est := min(n1*n2/p2, n1)
 	return est, p1
 }
 
@@ -268,7 +266,7 @@ func (sj *SemiJoin) Rewind() {
 	sj.source2.Rewind()
 	sj.row2 = nil
 	sj.lookupRow = nil
-	sj.revState = rewound
+	sj.revState = iface.Rewound
 	// NOTE: sj.dedup and sj.indexed are NOT reset here - like Project,
 	// the dedup map remains valid for the underlying data across Rewind,
 	// only the cursor position (state) is reset.
@@ -277,14 +275,14 @@ func (sj *SemiJoin) Rewind() {
 func (sj *SemiJoin) Get(th *Thread, dir Dir) Row {
 	defer func(t uint64) { sj.tget += tsc.Read() - t }(tsc.Read())
 	if sj.reverse {
-		if sj.revState == eof {
+		if sj.revState.Eof() {
 			return nil
 		}
 		row := sj.getReverse(th, dir)
 		if row != nil {
-			sj.revState = within
+			sj.revState = iface.Within
 		} else {
-			sj.revState = eof
+			sj.revState = iface.Eof
 		}
 		return row
 	}
@@ -332,7 +330,7 @@ func (sj *SemiJoin) getReverse(th *Thread, dir Dir) Row {
 			}
 			sj.dedup = shmap.NewMapFuncs[rowHash, struct{}](hfn, eqfn)
 		}
-		if sj.revState == rewound && dir == Prev && !sj.indexed {
+		if sj.revState.Rewound() && dir == Prev && !sj.indexed {
 			sj.buildDedup(th)
 		}
 	}
@@ -500,11 +498,5 @@ func (sj *SemiJoin) Simple(th *Thread) []Row {
 }
 
 func (sj *SemiJoin) equalBy(th *Thread, row1, row2 Row) bool {
-	for _, col := range sj.by {
-		if row1.GetRawVal(sj.source1.Header(), col, th, sj.st) !=
-			row2.GetRawVal(sj.source2.Header(), col, th, sj.st) {
-			return false
-		}
-	}
-	return true
+	return EqualRows(sj.source1.Header(), row1, sj.source2.Header(), row2, sj.by, th, sj.st)
 }

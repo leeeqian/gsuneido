@@ -26,20 +26,20 @@ func TestSummarizeSelectFilter(t *testing.T) {
 	act(db, "insert { a: 3, b: 2, c: 30 } into test")
 	act(db, "insert { a: 4, b: 2, c: 25 } into test")
 
-	tran := sizeTran{db.NewReadTran()}
+	tran := sizeTran{db.NewReadTran(AllPerms)}
 	q := ParseQuery("test summarize a, max c", tran, nil)
 	q = SetupKey(q, ReadMode, tran)
 
 	// Test Select with summarized column (max_c)
 	// splitSelect should pass a to source, keep max_c for filtering
 	// Should filter to only row where a=2 and max_c = 20
-	sels := Sels{{"a", Pack(SuInt(2))}, {"max_c", Pack(SuInt(20))}}
+	sels := Sels{{"a", Pack(SuInt16(2))}, {"max_c", Pack(SuInt16(20))}}
 	q.Select(sels)
 	row := q.Get(nil, Next)
 	assert.T(t).That(row != nil)
 	hdr := q.Header()
-	assert.T(t).This(row.GetVal(hdr, "a", nil, nil)).Is(SuInt(2))
-	assert.T(t).This(row.GetVal(hdr, "max_c", nil, nil)).Is(SuInt(20))
+	assert.T(t).This(row.GetVal(hdr, "a", nil, nil)).Is(SuInt16(2))
+	assert.T(t).This(row.GetVal(hdr, "max_c", nil, nil)).Is(SuInt16(20))
 
 	// Should not get another row
 	row = q.Get(nil, Next)
@@ -47,7 +47,7 @@ func TestSummarizeSelectFilter(t *testing.T) {
 
 	// Test with wrong max_c - should return nil
 	q.Select(nil) // clear
-	sels[1].val = Pack(SuInt(999))
+	sels[1].val = Pack(SuInt16(999))
 	q.Select(sels)
 	row = q.Get(nil, Next)
 	assert.T(t).This(row).Is(nil)
@@ -58,7 +58,7 @@ func TestSummarize_ByOnConflict(t *testing.T) {
 	defer db.Close()
 	db.adm("create t (a, b, c) key(a)")
 
-	tran := db.NewReadTran()
+	tran := db.NewReadTran(AllPerms)
 	assert.T(t).This(func() {
 		ParseQuery("t summarize a, average a", tran, nil)
 	}).Panics("summarize: by and on columns conflict: a")
@@ -72,16 +72,31 @@ func TestSummarize_OutputColConflicts(t *testing.T) {
 	defer db.Close()
 	db.adm("create t (a, count, total_a) key(a)")
 
-	tran := db.NewReadTran()
-	assert.T(t).This(func() {
-		ParseQuery("t summarize count, total count", tran, nil)
-	}).Panics("summarize: on columns conflict with output columns: count")
+	tran := db.NewReadTran(AllPerms)
+	// output columns and input (on) columns are independent, so a name
+	// may appear in both (here "count" is both a count output and a source
+	// column read by total)
+	ParseQuery("t summarize count, total count", tran, nil)
 	assert.T(t).This(func() {
 		ParseQuery("t summarize total_a, total a", tran, nil)
 	}).Panics("summarize: output columns conflict with by: total_a")
 	assert.T(t).This(func() {
 		ParseQuery("t summarize total a, total a", tran, nil)
 	}).Panics("summarize: duplicate output column: total_a")
+}
+
+func TestSummarize_WholeRowConflict(t *testing.T) {
+	db := heapDb()
+	defer db.Close()
+	db.adm("create t (a, b) key(a)")
+
+	tran := db.NewReadTran(AllPerms)
+	assert.T(t).This(func() {
+		ParseQuery("t summarize a = min a", tran, nil)
+	}).Panics("summarize: output columns conflict with source columns: a")
+	assert.T(t).This(func() {
+		ParseQuery("t summarize b = min a", tran, nil)
+	}).Panics("summarize: output columns conflict with source columns: b")
 }
 
 func TestSummarize_Keys(t *testing.T) {

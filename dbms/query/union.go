@@ -11,6 +11,7 @@ import (
 
 	"github.com/apmckinlay/gsuneido/compile/ast"
 	. "github.com/apmckinlay/gsuneido/core"
+	"github.com/apmckinlay/gsuneido/db19/index/iface"
 	"github.com/apmckinlay/gsuneido/util/assert"
 	"github.com/apmckinlay/gsuneido/util/dbg"
 	"github.com/apmckinlay/gsuneido/util/set"
@@ -31,7 +32,7 @@ type Union struct {
 	src2      bool
 	prevDir   Dir
 	src1      bool
-	state
+	state     iface.State
 }
 
 type unionApproach struct {
@@ -283,7 +284,7 @@ func (u *Union) optLookupDir(mode Mode, req Require) (Cost, Cost, *unionApproach
 	nseeks := req.SeekCount(nrows1)
 	req1 := req
 	if req.use == ReqUnique || req.use == ReqGroup {
-		req1 = GroupReq(req.cols, req.SelectFrac(nrows1), int32(nseeks))
+		req1 = GroupReq(req.cols, req.SelectFrac(nrows1), nseeks)
 	}
 	fc1, vc1 := Optimize(u.source1, mode, req1)
 	if fc1+vc1 >= impossible {
@@ -298,7 +299,7 @@ func (u *Union) optLookupDir(mode Mode, req Require) (Cost, Cost, *unionApproach
 			&unionApproach{strat: unionLookup, req1: req1, req2: req1}
 	}
 	// else not disjoint so we need lookups on source2
-	req2 := UniqueReq(u.source2.Columns(), int32(nseeks))
+	req2 := UniqueReq(u.source2.Columns(), nseeks)
 	fc2, vc2 := Optimize(u.source2, mode, req2)
 	if fc2+vc2 >= impossible {
 		return impossible, impossible, nil
@@ -438,7 +439,7 @@ func (u *Union) setApproach(req Require, approach any, tran QueryTran) {
 	u.src1Only = set.Difference(u.source1.Columns(), u.source2.Columns())
 	u.empty1 = make(Row, len(u.source1.Header().Fields))
 	u.empty2 = make(Row, len(u.source2.Header().Fields))
-	u.state = rewound
+	u.state = iface.Rewound
 	u.src1get = u.source1.Get
 	u.src2get = u.source2.Get
 }
@@ -448,12 +449,12 @@ func (u *Union) setApproach(req Require, approach any, tran QueryTran) {
 func (u *Union) Rewind() {
 	u.source1.Rewind()
 	u.source2.Rewind()
-	u.state = rewound
+	u.state = iface.Rewound
 }
 
 func (u *Union) Get(th *Thread, dir Dir) Row {
 	defer func(t uint64) { u.tget += tsc.Read() - t }(tsc.Read())
-	if u.state == eof {
+	if u.state.Eof() {
 		return nil
 	}
 	var row Row
@@ -470,16 +471,16 @@ func (u *Union) Get(th *Thread, dir Dir) Row {
 		panic(assert.ShouldNotReachHere())
 	}
 	if row != nil {
-		u.state = within
+		u.state = iface.Within
 		u.ngets++
 	} else {
-		u.state = eof
+		u.state = iface.Eof
 	}
 	return row
 }
 
 func (u *Union) getLookup(th *Thread, dir Dir) Row {
-	if u.state == rewound {
+	if u.state.Rewound() {
 		u.src1 = (dir == Next)
 	}
 	var row Row
@@ -516,7 +517,7 @@ func (u *Union) getLookup(th *Thread, dir Dir) Row {
 
 func (u *Union) getMerge(th *Thread, dir Dir) (r Row) {
 	// refill row1 and row2
-	if u.state == rewound || (u.src1 && u.src2) {
+	if u.state.Rewound() || (u.src1 && u.src2) {
 		u.get1(th, dir)
 		u.get2(th, dir)
 	} else if u.src1 {
@@ -576,9 +577,11 @@ func (u *Union) get2(th *Thread, dir Dir) {
 }
 
 func (u *Union) compare(th *Thread, row1, row2 Row, cols []string) int {
+	rr1 := NewRowRec(row1, u.source1.Header(), th, u.st)
+	rr2 := NewRowRec(row2, u.source2.Header(), th, u.st)
 	for _, col := range cols {
-		x1 := row1.GetRawVal(u.source1.Header(), col, th, u.st)
-		x2 := row2.GetRawVal(u.source2.Header(), col, th, u.st)
+		x1 := rr1.GetRawVal(col)
+		x2 := rr2.GetRawVal(col)
 		if c := strings.Compare(x1, x2); c != 0 {
 			return c
 		}
@@ -588,7 +591,7 @@ func (u *Union) compare(th *Thread, row1, row2 Row, cols []string) int {
 
 func (u *Union) getMergeDisjoint(th *Thread, dir Dir) (r Row) {
 	// refill row1 and row2
-	if u.state == rewound {
+	if u.state.Rewound() {
 		u.get1(th, dir)
 		u.get2(th, dir)
 	} else if u.src1 {
@@ -643,7 +646,7 @@ func (u *Union) Select(sels Sels) {
 	dbg.Assert(func() bool { return checkSels(sels, u.source1.Columns()) })
 	dbg.Assert(func() bool { return checkSels(sels, u.source2.Columns()) })
 	u.nsels++
-	u.state = rewound
+	u.state = iface.Rewound
 	u.src1get = u.source1.Get
 	u.src2get = u.source2.Get
 	u.source1.Select(sels)

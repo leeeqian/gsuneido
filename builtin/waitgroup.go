@@ -40,25 +40,11 @@ func wg_Done(this Value) Value {
 	return nil
 }
 
-var _ = method(wg_Thread, "(block, name = false) :void")
+var _ = method(wg_Thread, "(@args) :void")
 
 func wg_Thread(th *Thread, this Value, args []Value) Value {
 	wg := this.(*suWaitGroup)
-	fn := args[0]
-	fn.SetConcurrent()
-	t2 := NewThread(th)
-	thread_Name(t2, args[1:])
-	threads.add(t2)
-	wg.wg.Go(func() {
-		defer func() {
-			t2.Close()
-			threads.remove(t2.Num)
-			if e := recover(); e != nil {
-				LogUncaught(t2, "Thread", e)
-			}
-		}()
-		t2.Call(fn)
-	})
+	startThread(th, args, &wg.wg)
 	return nil
 }
 

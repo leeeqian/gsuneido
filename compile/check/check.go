@@ -190,6 +190,10 @@ func (ck *Check) statement(
 			}
 		}
 		init, _ = ck.expr(stmt.Rhs, init)
+	case *ast.AtAssign:
+		id := stmt.Lhs.(*ast.Ident)
+		init = ck.initVar(init, id.Name, int(id.Pos))
+		init, _ = ck.expr(stmt.Rhs, init)
 	case *ast.Throw:
 		init, _ = ck.expr(stmt.E, init)
 		exit = true
@@ -624,7 +628,7 @@ func (ck *Check) process(params []ast.Param, init set) {
 			if pos := paramPos(params, id); pos >= 0 {
 				at = pos
 			} else if pos, ok := ck.AllInit[id]; ok {
-				at = int(pos)
+				at = pos
 			}
 			ck.CheckResult(at, "WARNING: initialized but not used: "+id)
 		}

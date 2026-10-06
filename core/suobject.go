@@ -275,19 +275,19 @@ func (ob *SuObject) ckSize() {
 
 // Delete removes a key.
 // If in the list, following list values are shifted over.
-func (ob *SuObject) Delete(_ *Thread, key Value) bool {
+// Returns the old value, or nil if not found.
+func (ob *SuObject) Delete(_ *Thread, key Value) Value {
 	ob.Lock()
 	defer ob.Unlock()
 	return ob.delete(key)
 }
-func (ob *SuObject) delete(key Value) bool {
+func (ob *SuObject) delete(key Value) Value {
 	defer ob.endMutate(ob.startMutate())
 	if i, ok := key.IfInt(); ok && 0 <= i && i < len(ob.list) {
-		ob.listDelete(i)
-		return true
+		return ob.listDelete(i)
 	}
-	_, ok := ob.named.Del(key)
-	return ok
+	v, _ := ob.named.Del(key)
+	return v
 }
 
 func (ob *SuObject) listDelete(i int) Value {
@@ -300,12 +300,13 @@ func (ob *SuObject) listDelete(i int) Value {
 
 // Erase removes a key.
 // If in the list, following list values are NOT shifted over.
-func (ob *SuObject) Erase(_ *Thread, key Value) bool {
+// Returns the old value, or nil if not found.
+func (ob *SuObject) Erase(_ *Thread, key Value) Value {
 	ob.Lock()
 	defer ob.Unlock()
 	return ob.erase(key)
 }
-func (ob *SuObject) erase(key Value) bool {
+func (ob *SuObject) erase(key Value) Value {
 	defer ob.endMutate(ob.startMutate())
 	if i, ok := key.IfInt(); ok && 0 <= i && i < len(ob.list) {
 		// migrate following list elements to named
@@ -313,11 +314,12 @@ func (ob *SuObject) erase(key Value) bool {
 			ob.named.Put(IntVal(j), ob.list[j])
 			ob.list[j] = nil // aid garbage collection
 		}
+		x := ob.list[i]
 		ob.list = ob.list[:i]
-		return true
+		return x
 	}
-	_, ok := ob.named.Del(key)
-	return ok
+	v, _ := ob.named.Del(key)
+	return v
 }
 
 func (ob *SuObject) PopFirst() Value {
@@ -475,7 +477,7 @@ func (ob *SuObject) mustBeMutable() {
 		// two threads could (rarely) get in here at the same time
 		// (on different objects, since we lock)
 		ob.list = slc.Clone(ob.list)
-		ob.named = *ob.named.Copy()
+		ob.named = *ob.named.Clone()
 		// must do this last because if count goes to zero
 		// then another thread could modify
 		ob.copyCount.Add(-1)
@@ -1098,7 +1100,7 @@ func (ob *SuObject) PackSize(hash *uint64) int {
 	return ob.PackSize2(hash, newPackStack())
 }
 
-func (ob *SuObject) PackSize2(hash *uint64, stack packStack) int {
+func (ob *SuObject) PackSize2(hash *uint64, stack PackStack) int {
 	// must check stack before locking to avoid recursive deadlock
 	stack.push(ob)
 	ob.RLock()
@@ -1120,7 +1122,7 @@ func (ob *SuObject) PackSize2(hash *uint64, stack packStack) int {
 	return ps
 }
 
-func packSize(x Value, hash *uint64, stack packStack) int {
+func packSize(x Value, hash *uint64, stack PackStack) int {
 	if p, ok := x.(Packable); ok {
 		n := p.PackSize2(hash, stack)
 		return varint.Len(uint64(n)) + n

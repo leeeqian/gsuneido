@@ -6,7 +6,7 @@
 # The windows amd64 gui version will run on Arm Windows with emulation.
 # requires sh (and date and rm) on path (e.g. from msys2)
 
-BUILT=$(shell date "+%b %-d %Y %H:%M")
+BUILT:=$(shell date "+%b %-d %Y %H:%M")
 
 GOOS = $(shell go env GOOS)
 GOARCH = $(shell go env GOARCH)
@@ -49,18 +49,18 @@ define BUILD_BINARY
 	go $(BUILD) -o $@ -ldflags "$(LDFLAGS)"
 endef
 
-gs_% : FORCE
+gs_% : FORCE dbms/server.crt
 	$(call BUILD_BINARY)
 ifeq ($(GOOS),darwin)
 	codesign --force --sign - $@
 endif
 
-gs_%.exe : FORCE
+gs_%.exe : FORCE dbms/server.crt
 	$(call BUILD_BINARY)
 
 WINGUI = -X main.mode=gui -H windowsgui
 	
-gs_windows_amd64_gui.exe : FORCE gsuneido_windows_amd64.syso
+gs_windows_amd64_gui.exe : FORCE gsuneido_windows_amd64.syso dbms/server.crt
 	@go version
 	go run cmd/deps/deps.go
 	CGO_ENABLED=1 \
@@ -76,20 +76,28 @@ both: build gui
 deploy : git-status gs_windows_amd64.exe gs_windows_amd64_gui.exe \
 	gs_linux_arm64 gs_linux_amd64
 	@mkdir -p deploy
-	cp gs_windows_amd64.exe deploy\gsport.exe
-	cp gs_windows_amd64_gui.exe deploy\gsuneido.exe
+	cp gs_windows_amd64.exe deploy/gsport.exe
+	cp gs_windows_amd64_gui.exe deploy/gsuneido.exe
 	mv gs_linux_amd64 gs_linux_arm64 deploy
-	@echo Remember to tag the release and to update stdlib and suneidoc
+	rm -f dbms/server.crt dbms/server.key dbms/client.crt dbms/client.key
 
 # NOTE: requires test e.g. from msys
 git-status :
 	@test -z "$(shell git status --porcelain)"
 
+PBT_PKGS     = ./typechecker/internal/engine/ ./typechecker/typealgebra/
+PBT_ITERS   ?= 500
+PBT_TIMEOUT ?= 30m
+
 test :
 	CGO_ENABLED=0 \
 	go test -short -vet=off -timeout 30s ./...
-	
-fulltest: build test
+
+pbt :
+	go test $(PBT_PKGS) -run TestProp -count=1 \
+	  -timeout $(PBT_TIMEOUT) -rapid.checks=$(PBT_ITERS)
+
+fulltest: build test pbt
 	go test -run "^$$" -fuzz=FuzzRandom -fuzztime=60s ./dbms/query/
 	./gs_$(GOOS)_$(GOARCH)$(EXE) etatests.ss	
 	./gs_$(GOOS)_$(GOARCH)$(EXE) "QueryFuzz.Cmdline(60)"	
@@ -115,7 +123,7 @@ clean :
 # for cross compiling on Arm Mac for Arm Windows
 LLVM_MINGW = /Users/andrew/apps/llvm-mingw/bin/aarch64-w64-mingw32
 
-gs_windows_arm64_gui.exe : FORCE gsuneido_windows_arm64.syso
+gs_windows_arm64_gui.exe : FORCE gsuneido_windows_arm64.syso dbms/server.crt dbms/client.crt
 	CGO_ENABLED=1 \
 	GOARCH=arm64 GOOS=windows \
 	CC=$(LLVM_MINGW)-clang \
@@ -130,7 +138,10 @@ gsuneido_windows_arm64.syso : res/suneido.rc res/suneido.manifest
 dbms/server.crt :
 	openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
 		-keyout dbms/server.key -out dbms/server.crt -subj "/CN=internal-api" \
-		-addext "subjectAltName = DNS:localhost,IP:127.0.0.1"
+		-addext "subjectAltName = DNS:localhost,IP:127.0.0.1" --quiet
+	openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+		-keyout dbms/client.key -out dbms/client.crt -subj "/CN=internal-api-client" \
+		-addext "basicConstraints=critical,CA:TRUE" --quiet
 
 release:
 	./gsuneido -dump stdlib
@@ -166,5 +177,5 @@ help:
 	@echo "clean"
 	@echo "    remove built files"
 
-.PHONY : FORCE build test fulltest generate clean zap race racetest release \
+.PHONY : FORCE build test pbt fulltest generate clean zap race racetest release \
     help deploy git-status both gui sujs

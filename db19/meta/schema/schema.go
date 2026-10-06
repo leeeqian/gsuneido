@@ -5,6 +5,7 @@
 package schema
 
 import (
+	"strconv"
 	"strings"
 
 	"slices"
@@ -16,6 +17,9 @@ import (
 	"github.com/apmckinlay/gsuneido/util/slc"
 	"github.com/apmckinlay/gsuneido/util/str"
 )
+
+const maxColumns = 1000
+const maxIndexes = 100
 
 type Schema struct {
 	Table string
@@ -175,6 +179,9 @@ func (ix *Index) Equal(iy *Index) bool {
 }
 
 func (sc *Schema) Check() {
+	if len(sc.Indexes) > maxIndexes {
+		panic("too many indexes in " + sc.Table + " (limit " + strconv.Itoa(maxIndexes) + ")")
+	}
 	sc.checkColumns()
 	sc.checkDerived()
 	sc.checkForKey()
@@ -182,6 +189,9 @@ func (sc *Schema) Check() {
 }
 
 func (sc *Schema) checkColumns() {
+	if len(sc.Columns) > maxColumns {
+		panic("too many columns in " + sc.Table + " (limit " + strconv.Itoa(maxColumns) + ")")
+	}
 	n := len(sc.Columns)
 	for i := range n {
 		assert.That(sc.Columns[i] != "")
@@ -231,6 +241,15 @@ func CheckIndexes(table string, cols []string, idxs []Index) {
 					col + " in " + table)
 			}
 		}
+		if ix.Mode == 'u' {
+			for j := range idxs {
+				key := &idxs[j]
+				if key.Mode == 'k' && containsKey(ix.Columns, key.Columns) {
+					panic("unique index contains key: " +
+						str.Join("(,)", ix.Columns) + " in " + table)
+				}
+			}
+		}
 		for j := range i {
 			if slices.Equal(ix.Columns, idxs[j].Columns) {
 				panic("duplicate index: " +
@@ -238,6 +257,22 @@ func CheckIndexes(table string, cols []string, idxs []Index) {
 			}
 		}
 	}
+}
+
+// containsKey returns whether idx contains every column of key,
+// taking _lower! into account.
+func containsKey(idx, key []string) bool {
+outer:
+	for _, ke := range key {
+		ket := strings.TrimSuffix(ke, "_lower!")
+		for _, ie := range idx {
+			if ie == ke || ie == ket {
+				continue outer
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func (sc *Schema) Cksum() uint32 {
