@@ -4,12 +4,7 @@
 package dbms
 
 import (
-	"context"
-
 	. "github.com/apmckinlay/gsuneido/core"
-	"github.com/apmckinlay/gsuneido/util/assert"
-	"github.com/apmckinlay/gsuneido/util/atomics"
-	"golang.org/x/time/rate"
 )
 
 /*
@@ -36,11 +31,6 @@ func Unauth(dbms *DbmsLocal) IDbms {
 	return &DbmsUnauth{dbms: dbms}
 }
 
-// StandaloneDbms is the current dbms for standalone mode.
-// It starts as an unauth wrapper and is replaced by DbmsLocal on auth.
-// Needs atomic because Auth runs on a different thread than GetDbms callers.
-var StandaloneDbms atomics.Intfc[IDbms]
-
 // DbmsUnauth is a wrapper for DbmsLocal for unauthorized client connections.
 // Only allows LibGet, Libraries, SessionId, and Use
 type DbmsUnauth struct {
@@ -56,7 +46,6 @@ func (du *DbmsUnauth) Admin(string, *Sviews, *Perms) {
 }
 
 func (du *DbmsUnauth) Auth(th *Thread, data Value) (result bool) {
-	// This is only used by standalone mode.
 	// Give the thread the unwrapped dbms since the app Auth may query the db.
 	// Restore it if the app Auth fails or throws.
 	prev := th.SetDbms(du.dbms)
@@ -65,49 +54,23 @@ func (du *DbmsUnauth) Auth(th *Thread, data Value) (result bool) {
 			th.SetDbms(prev)
 		}
 	}()
-	result, perms := auth(th, data)
-	if result {
-		th.SetPerms(perms)
-		StandaloneDbms.Store(du.dbms) // unwrap
-	}
-	return result
-}
-
-// authLimiter limits the rate of authentication attempts
-var authLimiter = rate.NewLimiter(rate.Limit(4), 1)
-var authContext = context.Background()
-
-func auth(th *Thread, data Value) (bool, *Perms) {
-	authLimiter.Wait(authContext)
-	authFn := Global.FindName(th, "Auth")
-	if authFn == nil {
-		return false, nil
-	}
-	assert.That(th.Perms() == nil)
-	perms := &Perms{}
-	th.SetPerms(perms)
-	th.SetNewPerms(perms)
-	defer func() {
-		th.SetPerms(nil)
-		th.SetNewPerms(nil)
-	}()
-	result := ToBool(th.CallEach(authFn, data))
-	if !result {
-		return false, nil
-	}
-	return true, perms
+	return du.dbms.Auth(th, data)
 }
 
 func (du *DbmsUnauth) Check(bool) string {
 	panic(notauth)
 }
 
-func (du *DbmsUnauth) Close() {
-	du.dbms.Close()
+func (du *DbmsUnauth) CloseConn() {
+	du.dbms.CloseConn()
 }
 
 func (du *DbmsUnauth) Connections() Value {
 	panic(notauth)
+}
+
+func (du *DbmsUnauth) New() IDbms {
+	return du
 }
 
 func (du *DbmsUnauth) Cursor(string, *Sviews, *Perms) ICursor {

@@ -53,8 +53,21 @@ func (dbms *DbmsLocal) AdminTest(admin string) {
 	dbms.Admin(admin, nil, AllPerms)
 }
 
-func (dbms *DbmsLocal) Auth(th *Thread, data Value) bool {
-	return true
+func (*DbmsLocal) Auth(th *Thread, data Value) (result bool) {
+	authFn := Global.FindName(th, "Auth")
+	if authFn == nil {
+		return false
+	}
+	perms := &Perms{}
+	th.SetNewPerms(perms)
+	prev := th.SetPerms(perms)
+	defer func() {
+		if !result {
+			th.SetPerms(prev)
+		}
+		th.SetNewPerms(nil)
+	}()
+	return ToBool(th.CallEach(authFn, data))
 }
 
 func (dbms *DbmsLocal) Check(full bool) string {
@@ -66,6 +79,10 @@ func (dbms *DbmsLocal) Check(full bool) string {
 
 func (*DbmsLocal) Connections() Value {
 	return connections()
+}
+
+func (dbms *DbmsLocal) New() IDbms {
+	return dbms // ok to reuse, thread-safe
 }
 
 // Cursor builds a cursor using perms for the transaction it is planned with.
@@ -334,6 +351,10 @@ func (dbms *DbmsLocal) FormatQuery(query string, perms *Perms) string {
 	t := dbms.db.NewReadTran(perms)
 	defer t.Complete()
 	return qry.Format(t, query)
+}
+
+func (dbms *DbmsLocal) CloseConn() {
+	// nop for DbmsLocal
 }
 
 func (dbms *DbmsLocal) Close() {

@@ -46,6 +46,11 @@ func (dc *dbmsClient) NewSession() *muxSession {
 
 var _ IDbms = (*muxSession)(nil)
 
+func (ms *muxSession) New() IDbms {
+	cs := ms.NewClientSession()
+	return &muxSession{ClientSession: cs}
+}
+
 func (ms *muxSession) Admin(admin string, _ *Sviews, _ *Perms) {
 	ms.PutCmd(commands.Admin).PutStr(admin)
 	ms.Request()
@@ -108,9 +113,8 @@ func (ms *muxSession) Check(full bool) string {
 	return ms.GetStr()
 }
 
-func (ms *muxSession) Close() {
-	ms.PutCmd(commands.EndSession)
-	ms.EndMsg()
+func (ms *muxSession) CloseConn() {
+	ms.EndSession()
 }
 
 func (ms *muxSession) Connections() Value {

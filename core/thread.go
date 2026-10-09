@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/apmckinlay/gsuneido/core/trace"
-	"github.com/apmckinlay/gsuneido/options"
 	"github.com/apmckinlay/gsuneido/util/assert"
 	"github.com/apmckinlay/gsuneido/util/atomics"
 	"github.com/apmckinlay/gsuneido/util/cache"
@@ -125,20 +124,62 @@ type thread2 struct {
 
 var threadNum atomic.Int32
 
-// NewThread creates a new thread.
-// It is primarily used for user initiated threads.
-// If parent is nil the new thread will not have any permissions.
-func NewThread(parent *Thread) *Thread {
+// NewThread creates a new thread with the given dbms and perms
+func NewThread(dbms IDbms, perms *Perms) *Thread {
 	th := setup(&Thread{})
-	if parent != nil {
-		if suneido := parent.Suneido.Load(); suneido != nil {
-			suneido.SetConcurrent()
-			th.Suneido.Store(suneido)
-		}
-		th.sv = parent.sv
-		th.perms = parent.perms
+	th.dbms = dbms
+	th.perms = perms
+	return th
+}
+
+// NewChild creates a new child thread
+// with the parent's suneido, sviews, perms, and dbms
+func (th *Thread) NewChild() *Thread {
+	return th.Context().NewThread()
+}
+
+// ThreadContext is the session-scoped state carried over to a new thread.
+// Capture it on the originating thread before starting another goroutine.
+type ThreadContext struct {
+	Suneido *SuneidoObject
+	Perms   *Perms
+	Dbms    IDbms
+	Sviews  *Sviews
+}
+
+// Context returns the thread's session context.
+// It has no side effects so it can be called more than once.
+func (th *Thread) Context() ThreadContext {
+	return ThreadContext{
+		Suneido: th.Suneido.Load(),
+		Perms:   th.perms,
+		Dbms:    th.dbms,
+		Sviews:  th.sv,
+	}
+}
+
+// NewThread creates a new thread carrying this context.
+// The dbms is cloned so each thread has its own.
+func (ctx ThreadContext) NewThread() *Thread {
+	th := setup(&Thread{})
+	ctx.SetConcurrent()
+	if ctx.Suneido != nil {
+		th.Suneido.Store(ctx.Suneido)
+	}
+	th.perms = ctx.Perms
+	th.sv = ctx.Sviews
+	if ctx.Dbms != nil {
+		th.dbms = ctx.Dbms.New()
 	}
 	return th
+}
+
+// SetConcurrent marks the context's Suneido as concurrent.
+// It must be called on the originating thread before sharing.
+func (ctx ThreadContext) SetConcurrent() {
+	if ctx.Suneido != nil {
+		ctx.Suneido.SetConcurrent()
+	}
 }
 
 func setup(th *Thread) *Thread {
@@ -154,7 +195,6 @@ func setup(th *Thread) *Thread {
 
 // Invalidate is used by workers to help detect use of thread after request
 func (th *Thread) Invalidate() {
-	th.session.Store("INVALID")
 	th.sp = math.MaxInt
 	th.fp = math.MaxInt
 }
@@ -187,8 +227,10 @@ func (th *Thread) SetSviews(sv *Sviews) {
 	th.sv = sv
 }
 
-func (th *Thread) SetPerms(p *Perms) {
+func (th *Thread) SetPerms(p *Perms) *Perms {
+	prev := th.perms
 	th.perms = p
+	return prev
 }
 
 func (th *Thread) Perms() *Perms {
@@ -360,24 +402,17 @@ func (th *Thread) SetDbms(dbms IDbms) IDbms {
 	return prev
 }
 
-// GetDbms requires dependency injection
-var GetDbms = func() IDbms { panic("no dbms") }
-
 func (th *Thread) Dbms() IDbms {
 	if th.dbms == nil {
-		th.dbms = GetDbms()
-		if s := th.session.Load(); s != "" {
-			// session id was set before connecting
-			th.dbms.SessionId(th, s)
-		}
+		panic("thread does not have dbms")
 	}
 	return th.dbms
 }
 
-// Close closes the thread's dbms connection (if it has one)
+// Close closes the thread's dbms connection
 func (th *Thread) Close() {
-	if th.dbms != nil && options.Action == "client" {
-		th.dbms.Close()
+	if th.dbms != nil {
+		th.dbms.CloseConn()
 		th.dbms = nil
 	}
 }
@@ -386,14 +421,7 @@ func (th *Thread) SessionId(id string) string {
 	if id != "" && th == MainThread {
 		log.SetPrefix(id + " ")
 	}
-	if th.dbms == nil {
-		// don't create a connection just to get/set the session id
-		if id != "" {
-			th.SetSession(id)
-		}
-		return th.Session()
-	}
-	return th.dbms.SessionId(th, id)
+	return th.Dbms().SessionId(th, id)
 }
 
 func (th *Thread) Regex(x Value) regex.Pattern {
